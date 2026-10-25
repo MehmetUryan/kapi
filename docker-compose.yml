@@ -1,0 +1,13 @@
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped

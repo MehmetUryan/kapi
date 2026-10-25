@@ -6,6 +6,14 @@ import { desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db, invites, messages, rooms, sessions, users } from "./db.js";
 import { hashPassword, verifyPassword } from "./auth.js";
+import { fileURLToPath } from "node:url";
+import { AccessToken } from "livekit-server-sdk";
+
+try {
+  process.loadEnvFile(fileURLToPath(new URL("../../../.env", import.meta.url)));
+} catch {
+  // .env yoksa sesli oda çalışmaz, geri kalan her şey çalışır
+}
 
 type User = { id: string; username: string };
 type Client = { user: User; roomId: string | null; send: (data: unknown) => void };
@@ -168,6 +176,22 @@ app.get("/api/rooms/:id/messages", async (req, reply) => {
     .limit(50)
     .all();
   return rows.reverse();
+});
+app.post("/api/rooms/:id/voice-token", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  if (!db.select().from(rooms).where(eq(rooms.id, id)).get()) {
+    return reply.code(404).send({ error: "Oda bulunamadı" });
+  }
+  const key = process.env.LIVEKIT_API_KEY;
+  const secret = process.env.LIVEKIT_API_SECRET;
+  if (!key || !secret) {
+    return reply.code(500).send({ error: "LiveKit ayarı eksik (.env dosyasını kontrol et)" });
+  }
+  const at = new AccessToken(key, secret, { identity: user.id, name: user.username, ttl: "6h" });
+  at.addGrant({ roomJoin: true, room: id, canPublish: true, canSubscribe: true });
+  return { token: await at.toJwt(), url: process.env.LIVEKIT_URL ?? "ws://localhost:7880" };
 });
 
 // ---------- WebSocket ----------
