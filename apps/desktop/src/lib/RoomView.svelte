@@ -58,10 +58,22 @@
       <div class="shares">
         {#each voice.shares as s (s.id + (s.track.sid ?? ""))}
           <figure>
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video use:attach={s.track} autoplay playsinline muted></video>
-            <figcaption>{s.name} ekranını paylaşıyor</figcaption>
-          </figure>
+  <!-- svelte-ignore a11y_media_has_caption -->
+  <video
+    use:attach={s.track}
+    autoplay
+    playsinline
+    muted
+    ondblclick={(e) => e.currentTarget.requestFullscreen?.()}
+  ></video>
+  <figcaption>
+    {s.name} ekranını paylaşıyor ·
+    <button
+      class="link"
+      onclick={(e) => e.currentTarget.closest("figure")?.querySelector("video")?.requestFullscreen?.()}
+    >Tam ekran</button>
+  </figcaption>
+</figure>
         {/each}
       </div>
     {/if}
