@@ -1,10 +1,11 @@
-export type User = { id: string; username: string };
+export type User = { id: string; username: string; avatarAt: number | null };
 export type Room = { id: string; name: string; createdAt: number };
 export type Msg = {
   id: string;
   roomId: string;
   userId: string;
   username: string;
+  avatarAt: number | null;
   text: string;
   createdAt: number;
 };
@@ -18,6 +19,7 @@ export const setSession = (token: string) => localStorage.setItem(K.token, token
 export const clearSession = () => localStorage.removeItem(K.token);
 export const wsUrl = () =>
   `${getServer().replace(/^http/, "ws")}/ws?token=${encodeURIComponent(getToken())}`;
+export const avatarUrl = (id: string, v: number) => `${getServer()}/api/users/${id}/avatar?v=${v}`;
 
 export async function api<T>(
   path: string,

@@ -3,15 +3,19 @@
   import { live } from "$lib/live.svelte";
   import Avatar from "$lib/Avatar.svelte";
 
-  let { user, onopen, onlogout }: {
+  let { user, onopen, onprofile, onlogout }: {
     user: User;
     onopen: (r: Room) => void;
+    onprofile: () => void;
     onlogout: () => void;
   } = $props();
 
   let rooms = $state<Room[]>([]);
   let newName = $state("");
   let invite = $state("");
+  let error = $state("");
+  let confirmId = $state<string | null>(null);
+  let confirmTimer: number | undefined;
 
   async function load() {
     rooms = await api<Room[]>("/api/rooms");
@@ -32,9 +36,26 @@
   }
 
   async function makeInvite() {
-    const r = await api<{ code: string }>("/api/invites", { method: "POST" });
+    const r = await api<{ code: string }>("/api/invites", { method: "POST", body: {} });
     invite = r.code;
     navigator.clipboard?.writeText(r.code).catch(() => {});
+  }
+
+  async function removeRoom(r: Room) {
+    error = "";
+    if (confirmId !== r.id) {
+      confirmId = r.id;
+      clearTimeout(confirmTimer);
+      confirmTimer = window.setTimeout(() => (confirmId = null), 3000);
+      return;
+    }
+    confirmId = null;
+    try {
+      await api(`/api/rooms/${r.id}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : "Silinemedi";
+    }
   }
 </script>
 
@@ -43,8 +64,9 @@
     <h1>Kapı</h1>
     <div class="right">
       <span class="dot" class:on={live.connected} title={live.connected ? "Bağlı" : "Bağlanıyor"}></span>
-      <Avatar name={user.username} size={32} />
+      <Avatar name={user.username} id={user.id} v={user.avatarAt} size={32} />
       <b>{user.username}</b>
+      <button onclick={onprofile}>Profil</button>
       <button onclick={makeInvite}>Davet kodu</button>
       <button onclick={onlogout}>Çıkış</button>
     </div>
@@ -55,20 +77,30 @@
       Arkadaşına ver: <code>{invite}</code> (tek kullanımlık, panoya kopyalandı)
     </div>
   {/if}
+  {#if error}
+    <div class="card note err">{error}</div>
+  {/if}
 
   <section class="grid">
-    {#each rooms as r (r.id)}
+    {#each rooms as r, i (r.id)}
       {@const people = live.presence[r.id] ?? []}
-      <button class="room card" onclick={() => onopen(r)}>
-        <h2>{r.name}</h2>
-        <div class="faces">
-          {#each people.slice(0, 5) as p (p.id)}
-            <Avatar name={p.username} size={40} />
-          {/each}
-          {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
-        </div>
-        <small>{people.length ? `${people.length} kişi içeride` : "Şu an boş"}</small>
-      </button>
+      <div class="cell">
+        <button class="room card" onclick={() => onopen(r)}>
+          <h2>{r.name}</h2>
+          <div class="faces">
+            {#each people.slice(0, 5) as p (p.id)}
+              <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
+            {/each}
+            {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
+          </div>
+          <small>{people.length ? `${people.length} kişi içeride` : "Şu an boş"}</small>
+        </button>
+        {#if i > 0}
+          <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
+            {confirmId === r.id ? "Silinsin mi?" : "✕"}
+          </button>
+        {/if}
+      </div>
     {/each}
 
     <form class="room card new" onsubmit={createRoom}>
@@ -86,8 +118,11 @@
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #c9bfb2; }
   .dot.on { background: #6cc49a; }
   .note { padding: 12px 16px; margin-bottom: 16px; }
+  .err { color: #d1495b; }
   code { background: var(--soft); padding: 2px 8px; border-radius: 8px; font-weight: 700; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+  .cell { position: relative; display: flex; }
+  .cell .room { flex: 1; }
   .room {
     border-radius: var(--radius);
     padding: 18px;
@@ -103,4 +138,14 @@
   .more { color: var(--muted); font-weight: 600; }
   small { color: var(--muted); }
   .new { justify-content: center; border-style: dashed; box-shadow: none; }
+  .del {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.8rem;
+    background: transparent;
+    color: var(--muted);
+  }
+  .del:hover { color: #d1495b; background: var(--soft); }
 </style>

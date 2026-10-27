@@ -6,10 +6,16 @@
   import Login from "$lib/Login.svelte";
   import Lobby from "$lib/Lobby.svelte";
   import RoomView from "$lib/RoomView.svelte";
+  import Profile from "$lib/Profile.svelte";
 
   let user = $state<User | null>(null);
   let room = $state<Room | null>(null);
+  let profile = $state(false);
   let ready = $state(false);
+
+  $effect(() => {
+    if (room && live.deletedRoomId === room.id) room = null;
+  });
 
   onMount(async () => {
     if (getToken()) {
@@ -33,6 +39,7 @@
     clearSession();
     user = null;
     room = null;
+    profile = false;
   }
 </script>
 
@@ -41,7 +48,9 @@
     <Login onlogin={loggedIn} />
   {:else if room}
     <RoomView {room} {user} onback={() => (room = null)} />
+  {:else if profile}
+    <Profile {user} onback={() => (profile = false)} onsaved={(u) => (user = u)} />
   {:else}
-    <Lobby {user} onopen={(r) => (room = r)} onlogout={logout} />
+    <Lobby {user} onopen={(r) => (room = r)} onprofile={() => (profile = true)} onlogout={logout} />
   {/if}
 {/if}
