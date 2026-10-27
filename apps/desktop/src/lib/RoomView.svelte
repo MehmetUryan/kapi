@@ -83,7 +83,7 @@
         {@const st = voice.people[m.id]}
         <div class="person">
           <div class="face" class:speaking={st?.speaking}>
-            <Avatar name={m.username} size={voice.shares.length ? 56 : 88} />
+            <Avatar name={m.username} id={m.id} v={m.avatarAt} size={voice.shares.length ? 56 : 88} />
             {#if st?.muted}<span class="badge">🔇</span>{/if}
           </div>
           <span>{m.username}</span>
@@ -115,7 +115,7 @@
     <div class="list" bind:this={list}>
       {#each live.messages as m (m.id)}
         <div class="msg" class:mine={m.userId === user.id}>
-          {#if m.userId !== user.id}<Avatar name={m.username} size={28} />{/if}
+          {#if m.userId !== user.id}<Avatar name={m.username} id={m.userId} v={m.avatarAt} size={28} />{/if}
           <div class="bubble">
             {#if m.userId !== user.id}<b>{m.username}</b>{/if}
             <span class="txt">{m.text}</span>
