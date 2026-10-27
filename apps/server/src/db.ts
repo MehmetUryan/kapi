@@ -6,6 +6,8 @@ export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+    avatar: text("avatar"),
+  avatarAt: integer("avatar_at"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -68,5 +70,10 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_messages_room ON messages (room_id, created_at);
 `);
+const userCols = sqlite.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+if (!userCols.some((c) => c.name === "avatar")) {
+  sqlite.exec("ALTER TABLE users ADD COLUMN avatar TEXT");
+  sqlite.exec("ALTER TABLE users ADD COLUMN avatar_at INTEGER");
+}
 
 export const db = drizzle(sqlite);

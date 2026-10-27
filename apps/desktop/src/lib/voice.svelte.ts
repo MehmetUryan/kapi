@@ -25,7 +25,7 @@ class Voice {
         { method: "POST", body: {} },
       );
       const room = new Room({
-        adaptiveStream: true,
+        adaptiveStream: false,
         dynacast: true,
         audioCaptureDefaults: {
           echoCancellation: true,
@@ -91,7 +91,11 @@ class Voice {
   async toggleShare() {
     if (!this.room) return;
     try {
-      await this.room.localParticipant.setScreenShareEnabled(!this.sharing, { audio: true });
+      await this.room.localParticipant.setScreenShareEnabled(
+  !this.sharing,
+  { audio: true, resolution: { width: 1920, height: 1080, frameRate: 30 } },
+  { screenShareEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 }, screenShareSimulcastLayers: [] },
+);
     } catch {
       // seçim penceresi kapatıldı ya da izin verilmedi
     }

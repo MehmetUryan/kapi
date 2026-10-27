@@ -5,6 +5,7 @@ class Live {
   messages = $state<Msg[]>([]);
   roomsVersion = $state(0);
   connected = $state(false);
+  deletedRoomId = $state<string | null>(null);
 
   currentRoom: string | null = null;
   private ws: WebSocket | null = null;
@@ -40,6 +41,7 @@ class Live {
       const data = JSON.parse(e.data);
       if (data.type === "presence") this.presence = data.rooms;
       else if (data.type === "rooms") this.roomsVersion++;
+      else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
         this.messages = [...this.messages, data.message];
       }
