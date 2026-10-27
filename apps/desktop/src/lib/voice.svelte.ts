@@ -93,8 +93,8 @@ class Voice {
     try {
       await this.room.localParticipant.setScreenShareEnabled(
   !this.sharing,
-  { audio: true, resolution: { width: 1920, height: 1080, frameRate: 30 } },
-  { screenShareEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 }, screenShareSimulcastLayers: [] },
+  { audio: true, resolution: { width: 1280, height: 720, frameRate: 30 } },
+{ screenShareEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 }, screenShareSimulcastLayers: [] },
 );
     } catch {
       // seçim penceresi kapatıldı ya da izin verilmedi
