@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type Room, type User } from "$lib/api";
   import { live } from "$lib/live.svelte";
+  import { updater } from "$lib/updater.svelte";
   import Avatar from "$lib/Avatar.svelte";
 
   let { user, onopen, onprofile, onlogout }: {
@@ -61,7 +62,7 @@
 
 <div class="page">
   <header>
-    <h1>Kapı</h1>
+    <h1>Kapı {#if updater.current}<small>v{updater.current}</small>{/if}</h1>
     <div class="right">
       <span class="dot" class:on={live.connected} title={live.connected ? "Bağlı" : "Bağlanıyor"}></span>
       <Avatar name={user.username} id={user.id} v={user.avatarAt} size={32} />

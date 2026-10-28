@@ -1,8 +1,10 @@
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
 class Updater {
   status = $state<"idle" | "available" | "downloading" | "error">("idle");
+    current = $state("");
   version = $state("");
   percent = $state(0);
   error = $state("");
@@ -10,6 +12,7 @@ class Updater {
 
   async check() {
     if (!("__TAURI_INTERNALS__" in window)) return; // tarayıcıda çalışmaz
+        this.current = await getVersion().catch(() => "");
     if (this.status === "downloading") return;
     try {
       const u = await check();
