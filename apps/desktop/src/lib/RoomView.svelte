@@ -26,11 +26,11 @@
     tick().then(() => list?.scrollTo({ top: list.scrollHeight }));
   });
 
-  function attach(node: HTMLVideoElement, track: Track) {
-    track.attach(node);
+  function attach(node: HTMLVideoElement, track: Track | null) {
+    track?.attach(node);
     return {
       destroy() {
-        track.detach(node);
+        track?.detach(node);
       },
     };
   }
@@ -56,24 +56,49 @@
   <section class="stage card">
     {#if voice.shares.length}
       <div class="shares">
-        {#each voice.shares as s (s.id + (s.track.sid ?? ""))}
+        {#each voice.shares as s (s.id)}
           <figure>
-  <!-- svelte-ignore a11y_media_has_caption -->
-  <video
-    use:attach={s.track}
-    autoplay
-    playsinline
-    muted
-    ondblclick={(e) => e.currentTarget.requestFullscreen?.()}
-  ></video>
-  <figcaption>
-    {s.name} ekranını paylaşıyor ·
-    <button
-      class="link"
-      onclick={(e) => e.currentTarget.closest("figure")?.querySelector("video")?.requestFullscreen?.()}
-    >Tam ekran</button>
-  </figcaption>
-</figure>
+            {#if !s.watching}
+              <div class="ph">
+                <span><b>{s.name}</b> ekranını paylaşıyor</span>
+                <button class="primary" onclick={() => voice.watch(s.id)}>Yayını izle</button>
+              </div>
+            {:else}
+              {#if s.track}
+                <!-- svelte-ignore a11y_media_has_caption -->
+                <video
+                  use:attach={s.track}
+                  autoplay
+                  playsinline
+                  muted
+                  ondblclick={(e) => e.currentTarget.requestFullscreen?.()}
+                ></video>
+              {:else}
+                <div class="ph">Yayına bağlanılıyor…</div>
+              {/if}
+              <figcaption>
+                <span>{s.name}{s.paused ? " · duraklatıldı" : ""}</span>
+                <label class="vol">
+                  🔊
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={voice.volumes[s.id] ?? 1}
+                    oninput={(e) => voice.setShareVolume(s.id, Number(e.currentTarget.value))}
+                  />
+                </label>
+                <button
+                  class="link"
+                  onclick={(e) =>
+                    e.currentTarget.closest("figure")?.querySelector("video")?.requestFullscreen?.()}
+                >Tam ekran</button>
+                <button class="link" onclick={() => voice.refresh(s.id)}>Yenile</button>
+                <button class="link" onclick={() => voice.unwatch(s.id)}>İzlemeyi bırak</button>
+              </figcaption>
+            {/if}
+          </figure>
         {/each}
       </div>
     {/if}
@@ -102,10 +127,19 @@
         <button onclick={() => voice.toggleMic()}>
           {voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}
         </button>
+        {#if !voice.sharing}
+          <label class="chk">
+            <input type="checkbox" bind:checked={voice.shareAudio} />
+            Ekran sesi
+          </label>
+        {/if}
         <button onclick={() => voice.toggleShare()}>
           {voice.sharing ? "Paylaşımı durdur" : "Ekran paylaş"}
         </button>
         <button class="danger" onclick={() => voice.leave()}>Sesten çık</button>
+        {#if voice.quality === "poor" || voice.quality === "lost"}
+          <span class="err">⚠ Bağlantın zayıf</span>
+        {/if}
       {/if}
       {#if voice.error}<span class="err">{voice.error}</span>{/if}
     </div>
@@ -157,7 +191,24 @@
   }
   figure { margin: 0; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
   video { width: 100%; flex: 1; min-height: 0; max-height: 100%; background: #000; border-radius: 14px; object-fit: contain; }
-  figcaption { color: var(--muted); font-size: 0.8rem; text-align: center; }
+  figcaption { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; color: var(--muted); font-size: 0.8rem; }
+  .ph {
+    flex: 1;
+    min-height: 120px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: var(--soft);
+    border-radius: 14px;
+    padding: 16px;
+    text-align: center;
+  }
+  .vol { display: flex; align-items: center; gap: 6px; }
+  .vol input { width: 90px; padding: 0; border: 0; accent-color: var(--accent); }
+  .link { background: none; padding: 0; border-radius: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
+  .link:hover { transform: none; }
 
   .people { display: flex; flex-wrap: wrap; gap: 24px; justify-content: center; }
   .person { display: flex; flex-direction: column; align-items: center; gap: 8px; font-weight: 600; }
@@ -168,6 +219,8 @@
   .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
   .controls .danger { background: #d1495b; color: #fff; }
   .err { color: #d1495b; font-size: 0.85rem; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+  .chk input { width: auto; padding: 0; }
 
   .chat { height: 38%; min-height: 200px; display: flex; flex-direction: column; padding: 12px; gap: 10px; }
   .list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
