@@ -1,8 +1,7 @@
 <script lang="ts">
   import { api, getServer, setServer, setSession, type User } from "$lib/api";
 
-  let { onlogin }: { onlogin: (u: User) => void } = $props();
-
+  let { onlogin, notice = "" }: { onlogin: (u: User) => void; notice?: string } = $props();
   let mode = $state<"login" | "register">("login");
   let server = $state(getServer());
   let username = $state("");
@@ -37,6 +36,7 @@
   <form class="card box" onsubmit={submit}>
     <h1>Kapı</h1>
     <p class="sub">{mode === "login" ? "Tekrar hoş geldin." : "Davet koduyla içeri gir."}</p>
+    {#if notice}<p class="err">{notice}</p>{/if}
 
     <label>Sunucu <input bind:value={server} placeholder="http://localhost:3000" /></label>
     <label>Kullanıcı adı <input bind:value={username} autocomplete="username" /></label>

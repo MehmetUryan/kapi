@@ -5,6 +5,8 @@ class Live {
   voice = $state<Record<string, User[]>>({});
   messages = $state<Msg[]>([]);
   roomsVersion = $state(0);
+  meVersion = $state(0);
+  authLost = $state(false);
   connected = $state(false);
   deletedRoomId = $state<string | null>(null);
 
@@ -16,6 +18,7 @@ class Live {
 
   connect() {
     this.stopped = false;
+    this.authLost = false;
     this.open();
   }
 
@@ -48,15 +51,21 @@ class Live {
         this.presence = data.rooms;
         this.voice = data.voice ?? {};
       } else if (data.type === "rooms") this.roomsVersion++;
+      else if (data.type === "me") this.meVersion++;
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
         this.messages = [...this.messages, data.message];
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       if (this.ws !== ws) return;
       this.connected = false;
+      if (e.code === 4401 || e.code === 4403) {
+        this.stopped = true;
+        this.authLost = true;
+        return;
+      }
       if (!this.stopped) this.retry = window.setTimeout(() => this.open(), 2000);
     };
   }

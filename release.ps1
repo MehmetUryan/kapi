@@ -1,4 +1,7 @@
-param([Parameter(Mandatory = $true)][string]$Version)
+param(
+  [Parameter(Mandatory = $true)][string]$Version,
+  [string]$Note = ""
+)
 Set-Location $PSScriptRoot
 
 $env:V = $Version
@@ -6,11 +9,12 @@ node -e "const fs=require('fs');const p='apps/desktop/src-tauri/tauri.conf.json'
 
 git add .
 git status --short
-$ok = Read-Host "Bu değişiklikler v$Version olarak yayınlansın mı? (e/h)"
-if ($ok -ne "e") { git reset | Out-Null; Write-Host "İptal edildi."; exit }
+$ok = Read-Host "Bu degisiklikler v$Version olarak yayinlansin mi? (e/h)"
+if ($ok -ne "e") { git reset | Out-Null; Write-Host "Iptal edildi."; exit }
 
-git commit -m "Sürüm $Version"
+if ($Note) { $msg = "Release ${Version}: $Note" } else { $msg = "Release $Version" }
+git commit -m $msg
 git push
 git tag "v$Version"
 git push origin "v$Version"
-Write-Host "v$Version gönderildi. GitHub > Actions sekmesinden derlemeyi izle."
+Write-Host "v$Version gonderildi. GitHub > Actions sekmesinden derlemeyi izle."

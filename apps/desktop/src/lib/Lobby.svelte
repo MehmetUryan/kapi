@@ -4,19 +4,27 @@
   import { updater } from "$lib/updater.svelte";
   import Avatar from "$lib/Avatar.svelte";
 
-  let { user, onopen, onprofile, onlogout }: {
+  let { user, onopen, onprofile, onadmin, onlogout }: {
     user: User;
     onopen: (r: Room) => void;
     onprofile: () => void;
+    onadmin: () => void;
     onlogout: () => void;
   } = $props();
 
+  const staff = $derived(user.role === "owner" || user.role === "admin");
+
   let rooms = $state<Room[]>([]);
   let newName = $state("");
+  let newPrivate = $state(false);
+  let newPw = $state("");
   let invite = $state("");
   let error = $state("");
   let confirmId = $state<string | null>(null);
   let confirmTimer: number | undefined;
+  let unlockId = $state<string | null>(null);
+  let unlockPw = $state("");
+  let unlockErr = $state("");
 
   async function load() {
     rooms = await api<Room[]>("/api/rooms");
@@ -29,17 +37,60 @@
 
   async function createRoom(e: SubmitEvent) {
     e.preventDefault();
+    error = "";
     const name = newName.trim();
     if (!name) return;
-    await api("/api/rooms", { method: "POST", body: { name } });
-    newName = "";
-    await load();
+    if (newPrivate && newPw.length < 4) {
+      error = "Oda şifresi en az 4 karakter olmalı.";
+      return;
+    }
+    try {
+      await api("/api/rooms", {
+        method: "POST",
+        body: { name, password: newPrivate ? newPw : undefined },
+      });
+      newName = "";
+      newPw = "";
+      newPrivate = false;
+      await load();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Oda açılamadı";
+    }
   }
 
   async function makeInvite() {
-    const r = await api<{ code: string }>("/api/invites", { method: "POST", body: {} });
-    invite = r.code;
-    navigator.clipboard?.writeText(r.code).catch(() => {});
+    error = "";
+    try {
+      const r = await api<{ code: string }>("/api/invites", { method: "POST", body: {} });
+      invite = r.code;
+      navigator.clipboard?.writeText(r.code).catch(() => {});
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Kod üretilemedi";
+    }
+  }
+
+  function pick(r: Room) {
+    error = "";
+    if (r.locked && !r.access) {
+      unlockId = r.id;
+      unlockPw = "";
+      unlockErr = "";
+    } else {
+      onopen(r);
+    }
+  }
+
+  async function unlock(e: SubmitEvent, r: Room) {
+    e.preventDefault();
+    unlockErr = "";
+    try {
+      await api(`/api/rooms/${r.id}/unlock`, { method: "POST", body: { password: unlockPw } });
+      unlockId = null;
+      await load();
+      onopen(rooms.find((x) => x.id === r.id) ?? r);
+    } catch (err) {
+      unlockErr = err instanceof Error ? err.message : "Açılamadı";
+    }
   }
 
   async function removeRoom(r: Room) {
@@ -67,8 +118,13 @@
       <span class="dot" class:on={live.connected} title={live.connected ? "Bağlı" : "Bağlanıyor"}></span>
       <Avatar name={user.username} id={user.id} v={user.avatarAt} size={32} />
       <b>{user.username}</b>
+      {#if user.role === "owner"}<span class="role">Kurucu</span>
+      {:else if user.role === "admin"}<span class="role">Yönetici</span>{/if}
       <button onclick={onprofile}>Profil</button>
-      <button onclick={makeInvite}>Davet kodu</button>
+      {#if staff}
+        <button onclick={onadmin}>Yönetim</button>
+        <button onclick={makeInvite}>Davet kodu</button>
+      {/if}
       <button onclick={onlogout}>Çıkış</button>
     </div>
   </header>
@@ -83,31 +139,57 @@
   {/if}
 
   <section class="grid">
-    {#each rooms as r, i (r.id)}
-            {@const talking = live.voice[r.id] ?? []}
+    {#each rooms as r (r.id)}
+      {@const talking = live.voice[r.id] ?? []}
       {@const viewing = live.presence[r.id] ?? []}
       {@const people = talking.length ? talking : viewing}
       <div class="cell">
-        <button class="room card" onclick={() => onopen(r)}>
-          <h2>{r.name}</h2>
-          <div class="faces">
-            {#each people.slice(0, 5) as p (p.id)}
-              <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
-            {/each}
-            {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
-          </div>
-          <small>{talking.length ? `🔊 ${talking.length} kişi seste` : viewing.length ? `${viewing.length} kişi içeride` : "Şu an boş"}</small>
-        </button>
-        {#if i > 0}
-          <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
-            {confirmId === r.id ? "Silinsin mi?" : "✕"}
+        {#if unlockId === r.id}
+          <form class="room card" onsubmit={(e) => unlock(e, r)}>
+            <h2>🔒 {r.name}</h2>
+            <input type="password" bind:value={unlockPw} placeholder="Oda şifresi" autocomplete="off" />
+            {#if unlockErr}<small class="err">{unlockErr}</small>{/if}
+            <div class="row">
+              <button class="primary">Gir</button>
+              <button type="button" onclick={() => (unlockId = null)}>Vazgeç</button>
+            </div>
+          </form>
+        {:else}
+          <button class="room card" onclick={() => pick(r)}>
+            <h2>{r.locked ? "🔒 " : ""}{r.name}</h2>
+            <div class="faces">
+              {#each people.slice(0, 5) as p (p.id)}
+                <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
+              {/each}
+              {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
+            </div>
+            <small>{talking.length ? `🔊 ${talking.length} kişi seste` : viewing.length ? `${viewing.length} kişi içeride` : "Şu an boş"}</small>
           </button>
+          {#if r.canDelete}
+            <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
+              {confirmId === r.id ? "Silinsin mi?" : "✕"}
+            </button>
+          {/if}
         {/if}
       </div>
     {/each}
 
     <form class="room card new" onsubmit={createRoom}>
       <input bind:value={newName} placeholder="Yeni oda adı" maxlength="40" />
+      <div class="seg">
+        <button type="button" class:on={!newPrivate} onclick={() => (newPrivate = false)}>Herkese açık</button>
+        <button type="button" class:on={newPrivate} onclick={() => (newPrivate = true)}>🔒 Şifreli</button>
+      </div>
+      {#if newPrivate}
+        <input
+          type="password"
+          bind:value={newPw}
+          placeholder="Oda şifresi (en az 4)"
+          maxlength="64"
+          autocomplete="new-password"
+        />
+        <small>Kurucu her odaya girebilir.</small>
+      {/if}
       <button class="primary">Oda aç</button>
     </form>
   </section>
@@ -115,9 +197,10 @@
 
 <style>
   .page { padding: 22px 22px 90px; max-width: 1000px; margin: 0 auto; }
-  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 1.8rem; }
-  .right { display: flex; align-items: center; gap: 10px; }
+  .right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .role { font-size: 0.75rem; background: var(--soft); color: var(--muted); padding: 2px 10px; border-radius: 999px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #c9bfb2; }
   .dot.on { background: #6cc49a; }
   .note { padding: 12px 16px; margin-bottom: 16px; }
@@ -140,7 +223,12 @@
   .faces { display: flex; gap: 6px; align-items: center; min-height: 40px; }
   .more { color: var(--muted); font-weight: 600; }
   small { color: var(--muted); }
-  .new { justify-content: center; border-style: dashed; box-shadow: none; }
+  small.err { color: #d1495b; }
+  .row { display: flex; gap: 8px; }
+  .new { justify-content: center; border-style: dashed; box-shadow: none; gap: 10px; }
+  .seg { display: flex; gap: 6px; }
+  .seg button { flex: 1; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .del {
     position: absolute;
     top: 10px;

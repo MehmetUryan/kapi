@@ -3,10 +3,10 @@ import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { AccessToken } from "livekit-server-sdk";
-import { db, invites, messages, rooms, sessions, users } from "./db.js";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { db, invites, messages, roomMembers, rooms, sessions, users } from "./db.js";
 import { hashPassword, verifyPassword } from "./auth.js";
 
 try {
@@ -15,8 +15,16 @@ try {
   // .env yoksa sesli oda çalışmaz, geri kalan her şey çalışır
 }
 
-type User = { id: string; username: string; avatarAt: number | null };
-type Client = { user: User; roomId: string | null; voiceRoomId: string | null; send: (data: unknown) => void };
+type Role = "owner" | "admin" | "member";
+type User = { id: string; username: string; avatarAt: number | null; role: Role };
+type Client = {
+  user: User;
+  roomId: string | null;
+  voiceRoomId: string | null;
+  send: (data: unknown) => void;
+  close: () => void;
+};
+type RoomRow = typeof rooms.$inferSelect;
 
 const app = Fastify({ logger: { level: "warn" } });
 await app.register(cors, {
@@ -29,6 +37,19 @@ const clients = new Set<Client>();
 const now = () => Date.now();
 
 // ---------- yardımcılar ----------
+const userCols = {
+  id: users.id,
+  username: users.username,
+  avatarAt: users.avatarAt,
+  role: users.role,
+};
+
+function toUser(r: { id: string; username: string; avatarAt: number | null; role: string }): User {
+  return { id: r.id, username: r.username, avatarAt: r.avatarAt, role: r.role as Role };
+}
+
+const isStaff = (u: User) => u.role === "owner" || u.role === "admin";
+
 function makeInvite(createdBy: string | null) {
   const code = randomBytes(6).toString("hex").toUpperCase();
   db.insert(invites).values({ code, createdBy }).run();
@@ -43,24 +64,19 @@ function createSession(userId: string) {
 
 function userFromToken(token: string | undefined): User | null {
   if (!token) return null;
-  return (
-    db
-      .select({ id: users.id, username: users.username, avatarAt: users.avatarAt })
-      .from(sessions)
-      .innerJoin(users, eq(sessions.userId, users.id))
-      .where(eq(sessions.token, token))
-      .get() ?? null
-  );
+  const row = db
+    .select({ ...userCols, banned: users.banned })
+    .from(sessions)
+    .innerJoin(users, eq(sessions.userId, users.id))
+    .where(eq(sessions.token, token))
+    .get();
+  if (!row || row.banned) return null;
+  return toUser(row);
 }
 
 function publicUser(id: string): User | null {
-  return (
-    db
-      .select({ id: users.id, username: users.username, avatarAt: users.avatarAt })
-      .from(users)
-      .where(eq(users.id, id))
-      .get() ?? null
-  );
+  const row = db.select(userCols).from(users).where(eq(users.id, id)).get();
+  return row ? toUser(row) : null;
 }
 
 function requireUser(req: FastifyRequest, reply: FastifyReply) {
@@ -68,6 +84,51 @@ function requireUser(req: FastifyRequest, reply: FastifyReply) {
   const user = userFromToken(token);
   if (!user) reply.code(401).send({ error: "Giriş gerekli" });
   return user;
+}
+
+function requireStaff(req: FastifyRequest, reply: FastifyReply) {
+  const user = requireUser(req, reply);
+  if (!user) return null;
+  if (!isStaff(user)) {
+    reply.code(403).send({ error: "Bu işlem için yetkin yok" });
+    return null;
+  }
+  return user;
+}
+
+function requireOwner(req: FastifyRequest, reply: FastifyReply) {
+  const user = requireUser(req, reply);
+  if (!user) return null;
+  if (user.role !== "owner") {
+    reply.code(403).send({ error: "Bu işlemi sadece kurucu yapabilir" });
+    return null;
+  }
+  return user;
+}
+
+function canAccess(room: RoomRow, user: User) {
+  if (!room.passwordHash) return true;
+  if (user.role === "owner" || room.createdBy === user.id) return true;
+  return !!db
+    .select()
+    .from(roomMembers)
+    .where(and(eq(roomMembers.roomId, room.id), eq(roomMembers.userId, user.id)))
+    .get();
+}
+
+async function kickFromVoice(roomId: string | null, userId: string) {
+  const key = process.env.LIVEKIT_API_KEY;
+  const secret = process.env.LIVEKIT_API_SECRET;
+  const url = process.env.LIVEKIT_URL;
+  if (!roomId || !key || !secret || !url) return;
+  try {
+    await new RoomServiceClient(url.replace(/^ws/, "http"), key, secret).removeParticipant(
+      roomId,
+      userId,
+    );
+  } catch {
+    // oturum zaten bitmiş olabilir
+  }
 }
 
 function presence() {
@@ -111,7 +172,13 @@ const loginBody = z.object({
   username: z.string().trim(),
   password: z.string(),
 });
-const roomBody = z.object({ name: z.string().trim().min(1).max(40) });
+const roomBody = z.object({
+  name: z.string().trim().min(1).max(40),
+  password: z.string().min(4).max(64).optional(),
+});
+const unlockBody = z.object({ password: z.string().max(100) });
+const roleBody = z.object({ role: z.enum(["admin", "member"]) });
+const banBody = z.object({ banned: z.boolean() });
 const profileBody = z.object({
   username: usernameRule.optional(),
   avatar: z
@@ -141,20 +208,31 @@ app.post("/api/register", async (req, reply) => {
 
   const result = db.transaction((tx) => {
     const inv = tx.select().from(invites).where(eq(invites.code, body.invite)).get();
-    if (!inv || inv.usedBy) return "invite";
+    if (!inv || inv.usedBy) return "invite" as const;
     const taken = tx.select().from(users).where(eq(users.username, body.username)).get();
-    if (taken) return "taken";
+    if (taken) return "taken" as const;
+    const first = !tx.select({ id: users.id }).from(users).get();
+    const role: Role = first ? "owner" : "member";
     const id = randomUUID();
     tx.insert(users)
-      .values({ id, username: body.username, passwordHash: hashPassword(body.password), createdAt: now() })
+      .values({
+        id,
+        username: body.username,
+        passwordHash: hashPassword(body.password),
+        createdAt: now(),
+        role,
+      })
       .run();
     tx.update(invites).set({ usedBy: id }).where(eq(invites.code, body.invite)).run();
-    return id;
+    return { id, role };
   });
 
   if (result === "invite") return reply.code(403).send({ error: "Davet kodu geçersiz ya da kullanılmış" });
   if (result === "taken") return reply.code(409).send({ error: "Bu kullanıcı adı alınmış" });
-  return { token: createSession(result), user: { id: result, username: body.username, avatarAt: null } };
+  return {
+    token: createSession(result.id),
+    user: { id: result.id, username: body.username, avatarAt: null, role: result.role },
+  };
 });
 
 app.post("/api/login", async (req, reply) => {
@@ -163,10 +241,8 @@ app.post("/api/login", async (req, reply) => {
   if (!row || !verifyPassword(body.password, row.passwordHash)) {
     return reply.code(401).send({ error: "Kullanıcı adı ya da şifre hatalı" });
   }
-  return {
-    token: createSession(row.id),
-    user: { id: row.id, username: row.username, avatarAt: row.avatarAt },
-  };
+  if (row.banned) return reply.code(403).send({ error: "Bu hesap engellendi" });
+  return { token: createSession(row.id), user: toUser(row) };
 });
 
 // ---------- profil ----------
@@ -214,33 +290,142 @@ app.get("/api/users/:id/avatar", async (req, reply) => {
     .send(Buffer.from(b64, "base64"));
 });
 
+// ---------- yönetim ----------
 app.post("/api/invites", async (req, reply) => {
-  const user = requireUser(req, reply);
+  const user = requireStaff(req, reply);
   if (!user) return reply;
   return { code: makeInvite(user.id) };
 });
 
-// ---------- odalar ve mesajlar ----------
+app.get("/api/users", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  return db
+    .select({ ...userCols, banned: users.banned, createdAt: users.createdAt })
+    .from(users)
+    .orderBy(users.createdAt)
+    .all()
+    .map((r) => ({ ...toUser(r), banned: !!r.banned, createdAt: r.createdAt }));
+});
+
+app.patch("/api/users/:id/role", async (req, reply) => {
+  const me = requireOwner(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const body = roleBody.parse(req.body);
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
+  if (target.role === "owner") {
+    return reply.code(403).send({ error: "Kurucunun rolü değiştirilemez" });
+  }
+  db.update(users).set({ role: body.role }).where(eq(users.id, id)).run();
+  const fresh = publicUser(id);
+  if (fresh) {
+    for (const c of clients) {
+      if (c.user.id === id) {
+        c.user = fresh;
+        c.send({ type: "me" });
+        c.send({ type: "rooms" });
+      }
+    }
+  }
+  broadcastPresence();
+  return { ok: true };
+});
+
+app.post("/api/users/:id/ban", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const body = banBody.parse(req.body);
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
+  if (target.id === me.id) return reply.code(400).send({ error: "Kendini engelleyemezsin" });
+  if (target.role === "owner") return reply.code(403).send({ error: "Kurucu engellenemez" });
+  if (target.role === "admin" && me.role !== "owner") {
+    return reply.code(403).send({ error: "Yöneticileri sadece kurucu engelleyebilir" });
+  }
+
+  db.update(users).set({ banned: body.banned ? 1 : 0 }).where(eq(users.id, id)).run();
+  if (body.banned) {
+    db.delete(sessions).where(eq(sessions.userId, id)).run();
+    for (const c of [...clients]) {
+      if (c.user.id === id) {
+        const voiceRoom = c.voiceRoomId;
+        c.close();
+        void kickFromVoice(voiceRoom, id);
+      }
+    }
+  }
+  return { ok: true };
+});
+
+// ---------- odalar ----------
 app.get("/api/rooms", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
-  return db.select().from(rooms).orderBy(rooms.createdAt).all();
+  const all = db.select().from(rooms).orderBy(rooms.createdAt).all();
+  return all.map((r, i) => ({
+    id: r.id,
+    name: r.name,
+    createdAt: r.createdAt,
+    locked: !!r.passwordHash,
+    access: canAccess(r, user),
+    canDelete: i > 0 && (r.createdBy === user.id || isStaff(user)),
+  }));
 });
 
 app.post("/api/rooms", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const body = roomBody.parse(req.body);
-  const room = { id: randomUUID(), name: body.name, createdAt: now() };
-  db.insert(rooms).values(room).run();
+  const id = randomUUID();
+  db.insert(rooms)
+    .values({
+      id,
+      name: body.name,
+      createdAt: now(),
+      createdBy: user.id,
+      passwordHash: body.password ? hashPassword(body.password) : null,
+    })
+    .run();
   for (const c of clients) c.send({ type: "rooms" });
-  return room;
+  return { id, name: body.name, locked: !!body.password };
+});
+
+const attempts = new Map<string, { n: number; reset: number }>();
+
+app.post("/api/rooms/:id/unlock", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const body = unlockBody.parse(req.body);
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room.passwordHash || canAccess(room, user)) return { ok: true };
+
+  const key = `${user.id}:${id}`;
+  const a = attempts.get(key);
+  const active = a && a.reset > now() ? a : null;
+  if (active && active.n >= 5) {
+    return reply.code(429).send({ error: "Çok fazla deneme. Bir dakika bekle." });
+  }
+  if (!verifyPassword(body.password, room.passwordHash)) {
+    attempts.set(key, { n: (active?.n ?? 0) + 1, reset: active?.reset ?? now() + 60_000 });
+    return reply.code(403).send({ error: "Şifre yanlış" });
+  }
+  attempts.delete(key);
+  db.insert(roomMembers).values({ roomId: id, userId: user.id }).onConflictDoNothing().run();
+  return { ok: true };
 });
 
 app.get("/api/rooms/:id/messages", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const rows = db
     .select({
       id: messages.id,
@@ -264,14 +449,19 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
   const first = db.select().from(rooms).orderBy(rooms.createdAt).get();
   if (first?.id === id) return reply.code(403).send({ error: "Genel oda silinemez" });
-  if (!db.select().from(rooms).where(eq(rooms.id, id)).get()) {
-    return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (room.createdBy !== user.id && !isStaff(user)) {
+    return reply
+      .code(403)
+      .send({ error: "Bu odayı sadece açan kişi ya da yöneticiler silebilir" });
   }
+  db.delete(roomMembers).where(eq(roomMembers.roomId, id)).run();
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
-    for (const c of clients) {
+  for (const c of clients) {
     if (c.roomId === id || c.voiceRoomId === id) {
       if (c.roomId === id) c.roomId = null;
       if (c.voiceRoomId === id) c.voiceRoomId = null;
@@ -287,9 +477,9 @@ app.post("/api/rooms/:id/voice-token", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const { id } = req.params as { id: string };
-  if (!db.select().from(rooms).where(eq(rooms.id, id)).get()) {
-    return reply.code(404).send({ error: "Oda bulunamadı" });
-  }
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const key = process.env.LIVEKIT_API_KEY;
   const secret = process.env.LIVEKIT_API_SECRET;
   if (!key || !secret) {
@@ -315,9 +505,10 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     send: (data) => {
       if (socket.readyState === 1) socket.send(JSON.stringify(data));
     },
+    close: () => socket.close(4403, "closed"),
   };
   clients.add(client);
-    client.send(presenceMessage());
+  client.send(presenceMessage());
 
   socket.on("message", (raw: Buffer) => {
     let msg: z.infer<typeof clientMsg>;
@@ -328,14 +519,18 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     }
 
     if (msg.type === "join") {
-      if (!db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get()) return;
+      const r = db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get();
+      if (!r || !canAccess(r, client.user)) return;
       client.roomId = msg.roomId;
       broadcastPresence();
     } else if (msg.type === "leave") {
       client.roomId = null;
       broadcastPresence();
-        } else if (msg.type === "voice") {
-      if (msg.roomId && !db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get()) return;
+    } else if (msg.type === "voice") {
+      if (msg.roomId) {
+        const r = db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get();
+        if (!r || !canAccess(r, client.user)) return;
+      }
       client.voiceRoomId = msg.roomId;
       broadcastPresence();
     } else if (msg.type === "say") {

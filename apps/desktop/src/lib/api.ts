@@ -1,5 +1,14 @@
-export type User = { id: string; username: string; avatarAt: number | null };
-export type Room = { id: string; name: string; createdAt: number };
+export type Role = "owner" | "admin" | "member";
+export type User = { id: string; username: string; avatarAt: number | null; role?: Role };
+export type AdminUser = User & { banned: boolean; createdAt: number };
+export type Room = {
+  id: string;
+  name: string;
+  createdAt: number;
+  locked?: boolean;
+  access?: boolean;
+  canDelete?: boolean;
+};
 export type Msg = {
   id: string;
   roomId: string;
