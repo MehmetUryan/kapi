@@ -15,6 +15,13 @@
   let busy = $state(false);
   let fileInput = $state<HTMLInputElement>();
 
+  let oldPw = $state("");
+  let newPw = $state("");
+  let newPw2 = $state("");
+  let pwError = $state("");
+  let pwInfo = $state("");
+  let pwBusy = $state(false);
+
   async function save(patch: { username?: string; avatar?: string | null }) {
     error = "";
     info = "";
@@ -64,6 +71,35 @@
     const name = username.trim();
     if (name && name !== user.username) save({ username: name });
   }
+
+  async function changePassword(e: SubmitEvent) {
+    e.preventDefault();
+    pwError = "";
+    pwInfo = "";
+    if (newPw.length < 8) {
+      pwError = "Yeni şifre en az 8 karakter olmalı.";
+      return;
+    }
+    if (newPw !== newPw2) {
+      pwError = "Yeni şifreler aynı değil.";
+      return;
+    }
+    pwBusy = true;
+    try {
+      await api("/api/me/password", {
+        method: "POST",
+        body: { oldPassword: oldPw, newPassword: newPw },
+      });
+      oldPw = "";
+      newPw = "";
+      newPw2 = "";
+      pwInfo = "Şifren değişti. Diğer cihazlardaki oturumların kapatıldı.";
+    } catch (err) {
+      pwError = err instanceof Error ? err.message : String(err);
+    } finally {
+      pwBusy = false;
+    }
+  }
 </script>
 
 <main class="wrap">
@@ -93,6 +129,25 @@
 
     {#if error}<p class="err">{error}</p>{/if}
     {#if info}<p class="ok">{info}</p>{/if}
+
+    <hr />
+
+    <form onsubmit={changePassword}>
+      <h2>Şifreyi değiştir</h2>
+      <label>Eski şifre <input type="password" bind:value={oldPw} autocomplete="current-password" /></label>
+      <label>Yeni şifre <input type="password" bind:value={newPw} autocomplete="new-password" /></label>
+      <label>Yeni şifre (tekrar) <input type="password" bind:value={newPw2} autocomplete="new-password" /></label>
+      <button class="primary" disabled={pwBusy}>Şifreyi değiştir</button>
+      {#if pwError}<p class="err">{pwError}</p>{/if}
+      {#if pwInfo}<p class="ok">{pwInfo}</p>{/if}
+      <small>Eski şifreni hatırlamıyorsan bir yöneticiden sıfırlama kodu iste ve giriş ekranında "Şifremi unuttum"u kullan.</small>
+    </form>
+
+    <hr />
+    <small>
+      Mesajlar ve kayıtlar sunucuyu çalıştıran kişinin bilgisayarında saklanır. Yönetim günlüğü
+      giriş, oda ve ses kullanım olaylarını tutar, mesaj içeriklerini içermez.
+    </small>
   </div>
 </main>
 
@@ -101,6 +156,8 @@
   .box { width: 100%; max-width: 420px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
   .back { align-self: flex-start; }
   h1 { margin: 0; font-size: 1.8rem; }
+  h2 { margin: 0; font-size: 1.1rem; }
+  hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
   .photo { display: flex; align-items: center; gap: 18px; }
   .photo-actions { display: flex; flex-direction: column; gap: 8px; }
   form { display: flex; flex-direction: column; gap: 10px; }

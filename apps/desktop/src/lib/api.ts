@@ -1,6 +1,20 @@
 export type Role = "owner" | "admin" | "member";
 export type User = { id: string; username: string; avatarAt: number | null; role?: Role };
 export type AdminUser = User & { banned: boolean; createdAt: number };
+export type LogRow = {
+  id: number;
+  at: number;
+  action: string;
+  detail: string | null;
+  username: string | null;
+};
+export type Usage = {
+  periodStart: number;
+  limit: number;
+  totalMinutes: number;
+  activeNow: number;
+  perUser: { userId: string; username: string; minutes: number }[];
+};
 export type Room = {
   id: string;
   name: string;

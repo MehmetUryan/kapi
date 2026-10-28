@@ -1,12 +1,23 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, ne, or } from "drizzle-orm";
 import { z } from "zod";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
-import { db, invites, messages, roomMembers, rooms, sessions, users } from "./db.js";
+import {
+  db,
+  invites,
+  logs,
+  messages,
+  resetCodes,
+  roomMembers,
+  rooms,
+  sessions,
+  users,
+  voiceSessions,
+} from "./db.js";
 import { hashPassword, verifyPassword } from "./auth.js";
 
 try {
@@ -21,6 +32,7 @@ type Client = {
   user: User;
   roomId: string | null;
   voiceRoomId: string | null;
+  voiceSessionId: string | null;
   send: (data: unknown) => void;
   close: () => void;
 };
@@ -35,6 +47,7 @@ await app.register(websocket);
 
 const clients = new Set<Client>();
 const now = () => Date.now();
+const sha = (s: string) => createHash("sha256").update(s).digest();
 
 // ---------- yardımcılar ----------
 const userCols = {
@@ -49,6 +62,23 @@ function toUser(r: { id: string; username: string; avatarAt: number | null; role
 }
 
 const isStaff = (u: User) => u.role === "owner" || u.role === "admin";
+
+function log(action: string, userId: string | null, detail?: string) {
+  db.insert(logs).values({ at: now(), userId, action, detail: detail ?? null }).run();
+}
+
+// deneme sınırlayıcı
+type Bucket = { n: number; reset: number };
+const buckets = new Map<string, Bucket>();
+function isLimited(key: string, max: number) {
+  const b = buckets.get(key);
+  return !!b && b.reset > now() && b.n >= max;
+}
+function addFail(key: string, windowMs: number) {
+  const b = buckets.get(key);
+  if (b && b.reset > now()) b.n++;
+  else buckets.set(key, { n: 1, reset: now() + windowMs });
+}
 
 function makeInvite(createdBy: string | null) {
   const code = randomBytes(6).toString("hex").toUpperCase();
@@ -131,6 +161,70 @@ async function kickFromVoice(roomId: string | null, userId: string) {
   }
 }
 
+// ---------- ses oturumu kaydı (kullanım sayacı için) ----------
+function startVoice(c: Client, roomId: string) {
+  endVoice(c);
+  const id = randomUUID();
+  db.insert(voiceSessions).values({ id, userId: c.user.id, roomId, joinedAt: now() }).run();
+  c.voiceSessionId = id;
+}
+
+function endVoice(c: Client) {
+  if (!c.voiceSessionId) return;
+  db.update(voiceSessions)
+    .set({ leftAt: now() })
+    .where(eq(voiceSessions.id, c.voiceSessionId))
+    .run();
+  c.voiceSessionId = null;
+}
+
+function periodStart() {
+  const day = Math.min(28, Math.max(1, Number(process.env.USAGE_PERIOD_DAY ?? 1) || 1));
+  const d = new Date();
+  let s = new Date(d.getFullYear(), d.getMonth(), day);
+  if (s.getTime() > d.getTime()) s = new Date(d.getFullYear(), d.getMonth() - 1, day);
+  return s.getTime();
+}
+
+function usage() {
+  const start = periodStart();
+  const t = now();
+  const rows = db
+    .select()
+    .from(voiceSessions)
+    .where(or(isNull(voiceSessions.leftAt), gt(voiceSessions.leftAt, start)))
+    .all();
+  const per = new Map<string, number>();
+  let active = 0;
+  for (const s of rows) {
+    if (s.leftAt === null) active++;
+    const ms = Math.max(0, (s.leftAt ?? t) - Math.max(s.joinedAt, start));
+    per.set(s.userId, (per.get(s.userId) ?? 0) + ms);
+  }
+  const names = new Map<string, string>(
+    db
+      .select({ id: users.id, username: users.username })
+      .from(users)
+      .all()
+      .map((u) => [u.id, u.username] as [string, string]),
+  );
+  const perUser = [...per.entries()]
+    .map(([userId, ms]) => ({
+      userId,
+      username: names.get(userId) ?? "?",
+      minutes: Math.round(ms / 60000),
+    }))
+    .sort((a, b) => b.minutes - a.minutes);
+  const totalMinutes = Math.round([...per.values()].reduce((a, b) => a + b, 0) / 60000);
+  return {
+    periodStart: start,
+    limit: Number(process.env.VOICE_MONTHLY_LIMIT ?? 5000) || 5000,
+    totalMinutes,
+    activeNow: active,
+    perUser,
+  };
+}
+
 function presence() {
   const byRoom: Record<string, User[]> = {};
   for (const c of clients) {
@@ -169,8 +263,8 @@ const registerBody = z.object({
   invite: z.string().trim().toUpperCase(),
 });
 const loginBody = z.object({
-  username: z.string().trim(),
-  password: z.string(),
+  username: z.string().trim().max(40),
+  password: z.string().max(100),
 });
 const roomBody = z.object({
   name: z.string().trim().min(1).max(40),
@@ -179,6 +273,15 @@ const roomBody = z.object({
 const unlockBody = z.object({ password: z.string().max(100) });
 const roleBody = z.object({ role: z.enum(["admin", "member"]) });
 const banBody = z.object({ banned: z.boolean() });
+const passwordBody = z.object({
+  oldPassword: z.string().max(100),
+  newPassword: z.string().min(8).max(100),
+});
+const resetBody = z.object({
+  username: z.string().trim().max(40),
+  code: z.string().max(40),
+  password: z.string().min(8).max(100),
+});
 const profileBody = z.object({
   username: usernameRule.optional(),
   avatar: z
@@ -229,6 +332,7 @@ app.post("/api/register", async (req, reply) => {
 
   if (result === "invite") return reply.code(403).send({ error: "Davet kodu geçersiz ya da kullanılmış" });
   if (result === "taken") return reply.code(409).send({ error: "Bu kullanıcı adı alınmış" });
+  log("register", result.id);
   return {
     token: createSession(result.id),
     user: { id: result.id, username: body.username, avatarAt: null, role: result.role },
@@ -237,12 +341,100 @@ app.post("/api/register", async (req, reply) => {
 
 app.post("/api/login", async (req, reply) => {
   const body = loginBody.parse(req.body);
+  const key = `login:${body.username.toLowerCase()}`;
+  if (isLimited(key, 8)) {
+    return reply.code(429).send({ error: "Çok fazla deneme. 5 dakika sonra tekrar dene." });
+  }
   const row = db.select().from(users).where(eq(users.username, body.username)).get();
   if (!row || !verifyPassword(body.password, row.passwordHash)) {
+    addFail(key, 5 * 60_000);
+    log("login_fail", row?.id ?? null, row ? undefined : `kullanıcı adı: ${body.username.slice(0, 20)}`);
     return reply.code(401).send({ error: "Kullanıcı adı ya da şifre hatalı" });
   }
   if (row.banned) return reply.code(403).send({ error: "Bu hesap engellendi" });
+  buckets.delete(key);
+  log("login", row.id);
   return { token: createSession(row.id), user: toUser(row) };
+});
+
+// ---------- şifre ----------
+app.post("/api/me/password", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const body = passwordBody.parse(req.body);
+  const key = `pw:${user.id}`;
+  if (isLimited(key, 5)) {
+    return reply.code(429).send({ error: "Çok fazla deneme. Bir dakika bekle." });
+  }
+  const row = db.select().from(users).where(eq(users.id, user.id)).get();
+  if (!row || !verifyPassword(body.oldPassword, row.passwordHash)) {
+    addFail(key, 60_000);
+    return reply.code(403).send({ error: "Eski şifre yanlış" });
+  }
+  db.update(users)
+    .set({ passwordHash: hashPassword(body.newPassword) })
+    .where(eq(users.id, user.id))
+    .run();
+  const token = req.headers.authorization?.replace(/^Bearer /, "") ?? "";
+  db.delete(sessions).where(and(eq(sessions.userId, user.id), ne(sessions.token, token))).run();
+  buckets.delete(key);
+  log("password_change", user.id);
+  return { ok: true };
+});
+
+app.post("/api/reset-password", async (req, reply) => {
+  const body = resetBody.parse(req.body);
+  const key = `reset:${body.username.toLowerCase()}`;
+  if (isLimited(key, 5)) {
+    return reply.code(429).send({ error: "Çok fazla deneme. Bir dakika bekle." });
+  }
+  const bad = () => {
+    addFail(key, 60_000);
+    return reply.code(403).send({ error: "Kod geçersiz ya da süresi dolmuş" });
+  };
+  const u = db.select().from(users).where(eq(users.username, body.username)).get();
+  if (!u) return bad();
+  const rc = db.select().from(resetCodes).where(eq(resetCodes.userId, u.id)).get();
+  const code = body.code.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  if (!rc || rc.expiresAt < now() || !timingSafeEqual(sha(code), Buffer.from(rc.codeHash, "hex"))) {
+    return bad();
+  }
+  if (u.banned) return reply.code(403).send({ error: "Bu hesap engellendi" });
+  db.update(users).set({ passwordHash: hashPassword(body.password) }).where(eq(users.id, u.id)).run();
+  db.delete(resetCodes).where(eq(resetCodes.userId, u.id)).run();
+  db.delete(sessions).where(eq(sessions.userId, u.id)).run();
+  buckets.delete(key);
+  log("password_reset", u.id);
+  return { token: createSession(u.id), user: toUser(u) };
+});
+
+app.post("/api/users/:id/reset-code", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
+  if (target.id === me.id) {
+    return reply.code(400).send({ error: "Kendi şifreni Profil sayfasından değiştir" });
+  }
+  if (target.role === "owner") {
+    return reply.code(403).send({ error: "Kurucunun şifresi buradan sıfırlanamaz" });
+  }
+  if (target.role === "admin" && me.role !== "owner") {
+    return reply.code(403).send({ error: "Yöneticilerin şifresini sadece kurucu sıfırlayabilir" });
+  }
+  const code = randomBytes(5).toString("hex").toUpperCase();
+  const expiresAt = now() + 60 * 60_000;
+  const codeHash = sha(code).toString("hex");
+  db.insert(resetCodes)
+    .values({ userId: id, codeHash, expiresAt, createdBy: me.id })
+    .onConflictDoUpdate({
+      target: resetCodes.userId,
+      set: { codeHash, expiresAt, createdBy: me.id },
+    })
+    .run();
+  log("reset_code", me.id, `hedef: ${target.username}`);
+  return { code: `${code.slice(0, 5)}-${code.slice(5)}`, expiresAt };
 });
 
 // ---------- profil ----------
@@ -294,6 +486,7 @@ app.get("/api/users/:id/avatar", async (req, reply) => {
 app.post("/api/invites", async (req, reply) => {
   const user = requireStaff(req, reply);
   if (!user) return reply;
+  log("invite_create", user.id);
   return { code: makeInvite(user.id) };
 });
 
@@ -308,6 +501,30 @@ app.get("/api/users", async (req, reply) => {
     .map((r) => ({ ...toUser(r), banned: !!r.banned, createdAt: r.createdAt }));
 });
 
+app.get("/api/logs", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  return db
+    .select({
+      id: logs.id,
+      at: logs.at,
+      action: logs.action,
+      detail: logs.detail,
+      username: users.username,
+    })
+    .from(logs)
+    .leftJoin(users, eq(logs.userId, users.id))
+    .orderBy(desc(logs.id))
+    .limit(200)
+    .all();
+});
+
+app.get("/api/usage", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  return usage();
+});
+
 app.patch("/api/users/:id/role", async (req, reply) => {
   const me = requireOwner(req, reply);
   if (!me) return reply;
@@ -319,6 +536,7 @@ app.patch("/api/users/:id/role", async (req, reply) => {
     return reply.code(403).send({ error: "Kurucunun rolü değiştirilemez" });
   }
   db.update(users).set({ role: body.role }).where(eq(users.id, id)).run();
+  log("role_change", me.id, `hedef: ${target.username} → ${body.role === "admin" ? "yönetici" : "üye"}`);
   const fresh = publicUser(id);
   if (fresh) {
     for (const c of clients) {
@@ -347,6 +565,7 @@ app.post("/api/users/:id/ban", async (req, reply) => {
   }
 
   db.update(users).set({ banned: body.banned ? 1 : 0 }).where(eq(users.id, id)).run();
+  log(body.banned ? "ban" : "unban", me.id, `hedef: ${target.username}`);
   if (body.banned) {
     db.delete(sessions).where(eq(sessions.userId, id)).run();
     for (const c of [...clients]) {
@@ -389,11 +608,10 @@ app.post("/api/rooms", async (req, reply) => {
       passwordHash: body.password ? hashPassword(body.password) : null,
     })
     .run();
+  log("room_create", user.id, `${body.name}${body.password ? " (şifreli)" : ""}`);
   for (const c of clients) c.send({ type: "rooms" });
   return { id, name: body.name, locked: !!body.password };
 });
-
-const attempts = new Map<string, { n: number; reset: number }>();
 
 app.post("/api/rooms/:id/unlock", async (req, reply) => {
   const user = requireUser(req, reply);
@@ -404,18 +622,18 @@ app.post("/api/rooms/:id/unlock", async (req, reply) => {
   if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!room.passwordHash || canAccess(room, user)) return { ok: true };
 
-  const key = `${user.id}:${id}`;
-  const a = attempts.get(key);
-  const active = a && a.reset > now() ? a : null;
-  if (active && active.n >= 5) {
+  const key = `unlock:${user.id}:${id}`;
+  if (isLimited(key, 5)) {
     return reply.code(429).send({ error: "Çok fazla deneme. Bir dakika bekle." });
   }
   if (!verifyPassword(body.password, room.passwordHash)) {
-    attempts.set(key, { n: (active?.n ?? 0) + 1, reset: active?.reset ?? now() + 60_000 });
+    addFail(key, 60_000);
+    log("room_unlock_fail", user.id, room.name);
     return reply.code(403).send({ error: "Şifre yanlış" });
   }
-  attempts.delete(key);
+  buckets.delete(key);
   db.insert(roomMembers).values({ roomId: id, userId: user.id }).onConflictDoNothing().run();
+  log("room_unlock", user.id, room.name);
   return { ok: true };
 });
 
@@ -461,10 +679,14 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   db.delete(roomMembers).where(eq(roomMembers.roomId, id)).run();
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
+  log("room_delete", user.id, room.name);
   for (const c of clients) {
     if (c.roomId === id || c.voiceRoomId === id) {
       if (c.roomId === id) c.roomId = null;
-      if (c.voiceRoomId === id) c.voiceRoomId = null;
+      if (c.voiceRoomId === id) {
+        endVoice(c);
+        c.voiceRoomId = null;
+      }
       c.send({ type: "room-deleted", roomId: id });
     }
     c.send({ type: "rooms" });
@@ -502,6 +724,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     user,
     roomId: null,
     voiceRoomId: null,
+    voiceSessionId: null,
     send: (data) => {
       if (socket.readyState === 1) socket.send(JSON.stringify(data));
     },
@@ -530,6 +753,11 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       if (msg.roomId) {
         const r = db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get();
         if (!r || !canAccess(r, client.user)) return;
+        if (client.voiceRoomId !== msg.roomId || !client.voiceSessionId) {
+          startVoice(client, msg.roomId);
+        }
+      } else {
+        endVoice(client);
       }
       client.voiceRoomId = msg.roomId;
       broadcastPresence();
@@ -552,10 +780,30 @@ app.get("/ws", { websocket: true }, (socket, req) => {
   });
 
   socket.on("close", () => {
+    endVoice(client);
     clients.delete(client);
     broadcastPresence();
   });
 });
+
+// ---------- bakım ----------
+function cleanup() {
+  const t = now();
+  db.delete(logs).where(lt(logs.at, t - 90 * 86_400_000)).run();
+  db.delete(voiceSessions).where(lt(voiceSessions.joinedAt, t - 120 * 86_400_000)).run();
+  db.delete(resetCodes).where(lt(resetCodes.expiresAt, t)).run();
+  for (const [k, b] of buckets) if (b.reset < t) buckets.delete(k);
+}
+
+// sunucu kapanırken açık kalmış ses oturumlarını kapat (en fazla 6 saat say)
+for (const s of db.select().from(voiceSessions).where(isNull(voiceSessions.leftAt)).all()) {
+  db.update(voiceSessions)
+    .set({ leftAt: Math.min(s.joinedAt + 6 * 3_600_000, now()) })
+    .where(eq(voiceSessions.id, s.id))
+    .run();
+}
+cleanup();
+setInterval(cleanup, 24 * 3_600_000);
 
 // ---------- başlangıç ----------
 if (!db.select().from(rooms).get()) {

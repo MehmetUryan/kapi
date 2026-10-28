@@ -38,6 +38,29 @@ export const roomMembers = sqliteTable("room_members", {
   userId: text("user_id").notNull(),
 });
 
+export const logs = sqliteTable("logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  at: integer("at").notNull(),
+  userId: text("user_id"),
+  action: text("action").notNull(),
+  detail: text("detail"),
+});
+
+export const voiceSessions = sqliteTable("voice_sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  roomId: text("room_id").notNull(),
+  joinedAt: integer("joined_at").notNull(),
+  leftAt: integer("left_at"),
+});
+
+export const resetCodes = sqliteTable("reset_codes", {
+  userId: text("user_id").primaryKey(),
+  codeHash: text("code_hash").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+  createdBy: text("created_by"),
+});
+
 export const messages = sqliteTable("messages", {
   id: text("id").primaryKey(),
   roomId: text("room_id").notNull(),
@@ -107,5 +130,30 @@ if (!userCols2.some((c) => c.name === "role")) {
 sqlite.exec(
   "UPDATE users SET role = 'owner' WHERE id = (SELECT id FROM users ORDER BY created_at LIMIT 1) AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner')",
 );
+
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    user_id TEXT,
+    action TEXT NOT NULL,
+    detail TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_logs_at ON logs (at);
+  CREATE TABLE IF NOT EXISTS voice_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    room_id TEXT NOT NULL,
+    joined_at INTEGER NOT NULL,
+    left_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_voice_joined ON voice_sessions (joined_at);
+  CREATE TABLE IF NOT EXISTS reset_codes (
+    user_id TEXT PRIMARY KEY,
+    code_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_by TEXT
+  );
+`);
 
 export const db = drizzle(sqlite);
