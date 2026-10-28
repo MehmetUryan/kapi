@@ -3,10 +3,12 @@
   import { onMount } from "svelte";
   import { api, clearSession, getToken, type Room, type User } from "$lib/api";
   import { live } from "$lib/live.svelte";
+  import { updater } from "$lib/updater.svelte";
   import Login from "$lib/Login.svelte";
   import Lobby from "$lib/Lobby.svelte";
   import RoomView from "$lib/RoomView.svelte";
   import Profile from "$lib/Profile.svelte";
+  import UpdateBanner from "$lib/UpdateBanner.svelte";
 
   let user = $state<User | null>(null);
   let room = $state<Room | null>(null);
@@ -15,6 +17,12 @@
 
   $effect(() => {
     if (room && live.deletedRoomId === room.id) room = null;
+  });
+
+  onMount(() => {
+    updater.check();
+    const t = setInterval(() => updater.check(), 6 * 60 * 60 * 1000);
+    return () => clearInterval(t);
   });
 
   onMount(async () => {
@@ -42,6 +50,8 @@
     profile = false;
   }
 </script>
+
+<UpdateBanner />
 
 {#if ready}
   {#if !user}
