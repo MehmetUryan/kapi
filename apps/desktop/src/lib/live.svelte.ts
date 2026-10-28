@@ -2,12 +2,14 @@ import { api, wsUrl, type Msg, type User } from "./api";
 
 class Live {
   presence = $state<Record<string, User[]>>({});
+  voice = $state<Record<string, User[]>>({});
   messages = $state<Msg[]>([]);
   roomsVersion = $state(0);
   connected = $state(false);
   deletedRoomId = $state<string | null>(null);
 
   currentRoom: string | null = null;
+  private voiceRoom: string | null = null;
   private ws: WebSocket | null = null;
   private retry: number | undefined;
   private stopped = true;
@@ -24,8 +26,10 @@ class Live {
     this.ws = null;
     this.connected = false;
     this.presence = {};
+    this.voice = {};
     this.messages = [];
     this.currentRoom = null;
+    this.voiceRoom = null;
   }
 
   private open() {
@@ -35,12 +39,15 @@ class Live {
     ws.onopen = () => {
       this.connected = true;
       if (this.currentRoom) this.sendJson({ type: "join", roomId: this.currentRoom });
+      if (this.voiceRoom) this.sendJson({ type: "voice", roomId: this.voiceRoom });
     };
 
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
-      if (data.type === "presence") this.presence = data.rooms;
-      else if (data.type === "rooms") this.roomsVersion++;
+      if (data.type === "presence") {
+        this.presence = data.rooms;
+        this.voice = data.voice ?? {};
+      } else if (data.type === "rooms") this.roomsVersion++;
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
         this.messages = [...this.messages, data.message];
@@ -73,6 +80,11 @@ class Live {
     this.currentRoom = null;
     this.messages = [];
     this.sendJson({ type: "leave" });
+  }
+
+  setVoice(roomId: string | null) {
+    this.voiceRoom = roomId;
+    this.sendJson({ type: "voice", roomId });
   }
 
   say(text: string) {

@@ -10,14 +10,23 @@
 
   let text = $state("");
   let list = $state<HTMLDivElement>();
-  const members = $derived(live.presence[room.id] ?? []);
+
+  const members = $derived.by(() => {
+    const all = [...(live.presence[room.id] ?? [])];
+    for (const u of live.voice[room.id] ?? []) {
+      if (!all.some((m) => m.id === u.id)) all.push(u);
+    }
+    return all;
+  });
+  const inThisVoice = $derived(voice.joined && voice.room?.id === room.id);
+  const inOtherVoice = $derived(voice.joined && voice.room?.id !== room.id);
+  const shares = $derived(inThisVoice ? voice.shares : []);
 
   $effect(() => {
     const id = room.id;
     untrack(() => live.enter(id));
     return () => {
       live.leave();
-      voice.leave();
     };
   });
 
@@ -54,9 +63,9 @@
   </header>
 
   <section class="stage card">
-    {#if voice.shares.length}
+    {#if shares.length}
       <div class="shares">
-        {#each voice.shares as s (s.id)}
+        {#each shares as s (s.id)}
           <figure>
             {#if !s.watching}
               <div class="ph">
@@ -105,10 +114,10 @@
 
     <div class="people">
       {#each members as m (m.id)}
-        {@const st = voice.people[m.id]}
+        {@const st = inThisVoice ? voice.people[m.id] : undefined}
         <div class="person">
           <div class="face" class:speaking={st?.speaking}>
-            <Avatar name={m.username} id={m.id} v={m.avatarAt} size={voice.shares.length ? 56 : 88} />
+            <Avatar name={m.username} id={m.id} v={m.avatarAt} size={shares.length ? 56 : 88} />
             {#if st?.muted}<span class="badge">🔇</span>{/if}
           </div>
           <span>{m.username}</span>
@@ -119,9 +128,13 @@
     </div>
 
     <div class="controls">
-      {#if !voice.joined}
-        <button class="primary" onclick={() => voice.join(room.id)} disabled={voice.busy}>
-          {voice.busy ? "Bağlanıyor…" : "Sese katıl"}
+      {#if !inThisVoice}
+        <button class="primary" onclick={() => voice.join(room)} disabled={voice.busy}>
+          {voice.busy
+            ? "Bağlanıyor…"
+            : inOtherVoice
+              ? `Buraya geç (şu an: ${voice.room?.name})`
+              : "Sese katıl"}
         </button>
       {:else}
         <button onclick={() => voice.toggleMic()}>

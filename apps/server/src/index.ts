@@ -16,7 +16,7 @@ try {
 }
 
 type User = { id: string; username: string; avatarAt: number | null };
-type Client = { user: User; roomId: string | null; send: (data: unknown) => void };
+type Client = { user: User; roomId: string | null; voiceRoomId: string | null; send: (data: unknown) => void };
 
 const app = Fastify({ logger: { level: "warn" } });
 await app.register(cors, {
@@ -80,8 +80,22 @@ function presence() {
   return byRoom;
 }
 
+function voicePresence() {
+  const byRoom: Record<string, User[]> = {};
+  for (const c of clients) {
+    if (!c.voiceRoomId) continue;
+    const list = (byRoom[c.voiceRoomId] ??= []);
+    if (!list.some((u) => u.id === c.user.id)) list.push(c.user);
+  }
+  return byRoom;
+}
+
+function presenceMessage() {
+  return { type: "presence", rooms: presence(), voice: voicePresence() };
+}
+
 function broadcastPresence() {
-  const msg = { type: "presence", rooms: presence() };
+  const msg = presenceMessage();
   for (const c of clients) c.send(msg);
 }
 
@@ -110,6 +124,7 @@ const profileBody = z.object({
 const clientMsg = z.discriminatedUnion("type", [
   z.object({ type: z.literal("join"), roomId: z.string() }),
   z.object({ type: z.literal("leave") }),
+  z.object({ type: z.literal("voice"), roomId: z.string().nullable() }),
   z.object({ type: z.literal("say"), text: z.string().trim().min(1).max(2000) }),
 ]);
 
@@ -256,9 +271,10 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   }
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
-  for (const c of clients) {
-    if (c.roomId === id) {
-      c.roomId = null;
+    for (const c of clients) {
+    if (c.roomId === id || c.voiceRoomId === id) {
+      if (c.roomId === id) c.roomId = null;
+      if (c.voiceRoomId === id) c.voiceRoomId = null;
       c.send({ type: "room-deleted", roomId: id });
     }
     c.send({ type: "rooms" });
@@ -295,12 +311,13 @@ app.get("/ws", { websocket: true }, (socket, req) => {
   const client: Client = {
     user,
     roomId: null,
+    voiceRoomId: null,
     send: (data) => {
       if (socket.readyState === 1) socket.send(JSON.stringify(data));
     },
   };
   clients.add(client);
-  client.send({ type: "presence", rooms: presence() });
+    client.send(presenceMessage());
 
   socket.on("message", (raw: Buffer) => {
     let msg: z.infer<typeof clientMsg>;
@@ -316,6 +333,10 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       broadcastPresence();
     } else if (msg.type === "leave") {
       client.roomId = null;
+      broadcastPresence();
+        } else if (msg.type === "voice") {
+      if (msg.roomId && !db.select().from(rooms).where(eq(rooms.id, msg.roomId)).get()) return;
+      client.voiceRoomId = msg.roomId;
       broadcastPresence();
     } else if (msg.type === "say") {
       if (!client.roomId) return;

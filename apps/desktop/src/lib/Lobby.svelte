@@ -84,7 +84,9 @@
 
   <section class="grid">
     {#each rooms as r, i (r.id)}
-      {@const people = live.presence[r.id] ?? []}
+            {@const talking = live.voice[r.id] ?? []}
+      {@const viewing = live.presence[r.id] ?? []}
+      {@const people = talking.length ? talking : viewing}
       <div class="cell">
         <button class="room card" onclick={() => onopen(r)}>
           <h2>{r.name}</h2>
@@ -94,7 +96,7 @@
             {/each}
             {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
           </div>
-          <small>{people.length ? `${people.length} kişi içeride` : "Şu an boş"}</small>
+          <small>{talking.length ? `🔊 ${talking.length} kişi seste` : viewing.length ? `${viewing.length} kişi içeride` : "Şu an boş"}</small>
         </button>
         {#if i > 0}
           <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
@@ -112,7 +114,7 @@
 </div>
 
 <style>
-  .page { padding: 22px; max-width: 1000px; margin: 0 auto; }
+  .page { padding: 22px 22px 90px; max-width: 1000px; margin: 0 auto; }
   header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
   h1 { margin: 0; font-size: 1.8rem; }
   .right { display: flex; align-items: center; gap: 10px; }
