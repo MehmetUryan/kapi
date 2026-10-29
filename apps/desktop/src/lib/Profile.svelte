@@ -1,7 +1,10 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { api, type User } from "$lib/api";
+  import { desktop } from "$lib/desktop.svelte";
+  import { devices } from "$lib/devices.svelte";
   import { ACCENTS, THEMES, prefs } from "$lib/prefs.svelte";
+  import { voice } from "$lib/voice.svelte";
   import Avatar from "$lib/Avatar.svelte";
   import Toggle from "$lib/Toggle.svelte";
 
@@ -26,6 +29,31 @@
 
   let bgInput = $state<HTMLInputElement>();
   let bgError = $state("");
+
+  // mikrofon testi
+  let testing = $state(false);
+  let level = $state(0);
+  let testError = $state("");
+  let testStream: MediaStream | null = null;
+  let testCtx: AudioContext | null = null;
+  let raf = 0;
+
+  // kısayol kaydı
+  let recording = $state(false);
+  let keyHint = $state("");
+
+  const canSink =
+    typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
+
+  onMount(() => {
+    devices.refresh();
+    const h = () => devices.refresh();
+    navigator.mediaDevices?.addEventListener("devicechange", h);
+    return () => {
+      navigator.mediaDevices?.removeEventListener("devicechange", h);
+      stopTest();
+    };
+  });
 
   async function save(patch: { username?: string; avatar?: string | null }) {
     error = "";
@@ -128,7 +156,107 @@
       bgError = "Bu dosya okunamadı. JPG ya da PNG dene.";
     }
   }
+
+  // ---- ses cihazları ve test ----
+  async function startTest() {
+    stopTest();
+    testError = "";
+    try {
+      try {
+        testStream = await navigator.mediaDevices.getUserMedia({
+          audio: prefs.micId ? { deviceId: { exact: prefs.micId } } : true,
+        });
+      } catch {
+        testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+    } catch {
+      testError = "Mikrofon açılamadı. Mikrofon iznini kontrol et.";
+      return;
+    }
+    devices.refresh();
+    testCtx = new AudioContext();
+    const src = testCtx.createMediaStreamSource(testStream);
+    const an = testCtx.createAnalyser();
+    an.fftSize = 512;
+    src.connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    testing = true;
+    const frame = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      level = Math.min(100, Math.round((peak / 128) * 140));
+      raf = requestAnimationFrame(frame);
+    };
+    frame();
+  }
+
+  function stopTest() {
+    cancelAnimationFrame(raf);
+    testStream?.getTracks().forEach((t) => t.stop());
+    void testCtx?.close();
+    testStream = null;
+    testCtx = null;
+    testing = false;
+    level = 0;
+  }
+
+  async function changeMic(id: string) {
+    await voice.setMicDevice(id);
+    if (testing) startTest();
+  }
+
+  // ---- kısayol kaydı ----
+  function parseKey(e: KeyboardEvent): { accel?: string; wait?: boolean; error?: string } {
+    const code = e.code;
+    if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(code)) return { wait: true };
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push("Ctrl");
+    if (e.altKey) mods.push("Alt");
+    if (e.shiftKey) mods.push("Shift");
+    let key: string | null = null;
+    if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
+    else if (/^Digit[0-9]$/.test(code)) key = code.slice(5);
+    else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
+    else if (/^Numpad[0-9]$/.test(code)) key = code;
+    else if (
+      [
+        "Space", "Enter", "Tab", "Backspace", "Insert", "Delete", "Home", "End",
+        "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+      ].includes(code)
+    ) {
+      key = code;
+    }
+    if (!key) return { error: "Bu tuş kullanılamıyor." };
+    if (!mods.length && !/^F\d+$/.test(key)) {
+      return {
+        error: "Harf ve rakamlarla birlikte Ctrl, Alt ya da Shift'e bas (F tuşları tek başına olur).",
+      };
+    }
+    return { accel: [...mods, key].join("+") };
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (!recording) return;
+    e.preventDefault();
+    if (e.key === "Escape") {
+      recording = false;
+      keyHint = "";
+      return;
+    }
+    const r = parseKey(e);
+    if (r.wait) return;
+    if (r.error || !r.accel) {
+      keyHint = r.error ?? "";
+      return;
+    }
+    recording = false;
+    keyHint = "";
+    desktop.setMicKey(r.accel);
+  }
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <main class="wrap">
   <div class="card box">
@@ -230,6 +358,108 @@
     <hr />
 
     <section class="sect">
+      <h2>Ses</h2>
+      {#if devices.labelsHidden}
+        <button onclick={() => devices.askPermission()}>Cihaz adlarını göster (mikrofon izni ister)</button>
+      {/if}
+      <label>
+        Mikrofon
+        <select value={prefs.micId} onchange={(e) => changeMic(e.currentTarget.value)}>
+          <option value="">Varsayılan</option>
+          {#each devices.mics as d (d.deviceId)}
+            {#if d.deviceId !== "default" && d.deviceId !== "communications"}
+              <option value={d.deviceId}>{d.label || "Mikrofon"}</option>
+            {/if}
+          {/each}
+        </select>
+      </label>
+      {#if canSink}
+        <label>
+          Kulaklık / hoparlör
+          <select
+            value={prefs.speakerId}
+            onchange={(e) => voice.setSpeakerDevice(e.currentTarget.value)}
+          >
+            <option value="">Varsayılan</option>
+            {#each devices.speakers as d (d.deviceId)}
+              {#if d.deviceId !== "default" && d.deviceId !== "communications"}
+                <option value={d.deviceId}>{d.label || "Hoparlör"}</option>
+              {/if}
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <div class="meter" title="Mikrofon seviyesi"><i style="width:{level}%"></i></div>
+      <div class="row2">
+        <button onclick={() => (testing ? stopTest() : startTest())}>
+          {testing ? "Testi durdur" : "Mikrofonu dene"}
+        </button>
+        <small>{testing ? "Konuş, çubuk hareket etmeli." : "Sesin kendine geri verilmez."}</small>
+      </div>
+      {#if testError}<p class="err">{testError}</p>{/if}
+      {#if devices.error}<p class="err">{devices.error}</p>{/if}
+      <small>Odadaysan değişiklik hemen uygulanır. Bir kişinin sesini kısmak için odada avatarına tıkla.</small>
+    </section>
+
+    {#if desktop.available}
+      <hr />
+
+      <section class="sect">
+        <h2>Uygulama</h2>
+        {#if import.meta.env.DEV}
+          <small>"Windows ile başlat" sadece kurulu uygulamada denenebilir.</small>
+        {:else}
+          <Toggle
+            checked={desktop.autostart}
+            onchange={(v) => desktop.setAutostart(v)}
+            label="Windows açılınca başlat (arka planda, tepside)"
+          />
+        {/if}
+        <Toggle
+          checked={prefs.closeToTray}
+          onchange={(v) => desktop.setCloseToTray(v)}
+          label="Pencereyi kapatınca arka planda çalışmaya devam et"
+        />
+        <small>Tamamen kapatmak için saatin yanındaki Kapı simgesine sağ tıkla → Çıkış.</small>
+
+        <h3>Mikrofon kısayolu</h3>
+        <div class="row2">
+          {#if recording}
+            <span class="rec">Tuşlara bas… (Esc: vazgeç)</span>
+          {:else}
+            <code>{prefs.micKey || "Yok"}</code>
+            <button type="button" onclick={() => { keyHint = ""; recording = true; }}>Değiştir</button>
+            {#if prefs.micKey}
+              <button type="button" onclick={() => desktop.setMicKey("")}>Kaldır</button>
+            {/if}
+          {/if}
+        </div>
+        <div class="seg2">
+          <button
+            type="button"
+            class:on={prefs.micMode === "toggle"}
+            onclick={() => desktop.setMicMode("toggle")}
+          >Aç / kapat</button>
+          <button
+            type="button"
+            class:on={prefs.micMode === "hold"}
+            onclick={() => desktop.setMicMode("hold")}
+          >Bas-konuş</button>
+        </div>
+        <small>
+          {prefs.micMode === "hold"
+            ? "Tuşu basılı tuttuğun sürece mikrofon açık olur. Sese girdiğinde mikrofon kapalı başlar."
+            : "Tuşa her basışında mikrofon açılır ya da kapanır (kısa bip duyarsın)."}
+          Kısayol uygulama arka plandayken ya da oyundayken de çalışır.
+        </small>
+        {#if keyHint}<p class="err">{keyHint}</p>{/if}
+        {#if desktop.shortcutError}<p class="err">{desktop.shortcutError}</p>{/if}
+      </section>
+    {/if}
+
+    <hr />
+
+    <section class="sect">
       <h2>Bildirimler</h2>
       <Toggle
         checked={prefs.notifyOn}
@@ -262,10 +492,11 @@
 
 <style>
   .wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
-  .box { width: 100%; max-width: 460px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
+  .box { width: 100%; max-width: 480px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
   .back { align-self: flex-start; }
   h1 { margin: 0; font-size: 1.8rem; }
   h2 { margin: 0; font-size: 1.1rem; }
+  h3 { margin: 6px 0 0; font-size: 0.95rem; }
   hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
   .photo { display: flex; align-items: center; gap: 18px; }
   .photo-actions { display: flex; flex-direction: column; gap: 8px; }
@@ -274,6 +505,9 @@
   small { color: var(--muted); }
   .err { margin: 0; color: #d1495b; }
   .ok { margin: 0; color: #3d9a73; }
+  code { background: var(--soft); padding: 2px 10px; border-radius: 8px; font-weight: 700; }
+  .row2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .rec { color: var(--accent); font-weight: 600; }
 
   .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 8px; }
   .sw { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px; border-radius: 14px; background: var(--soft); border: 2px solid transparent; }
@@ -286,4 +520,11 @@
   .reset { padding: 0.25rem 0.8rem; font-size: 0.8rem; }
   .bgrow { display: flex; gap: 8px; flex-wrap: wrap; }
   .rng input { padding: 0; border: 0; accent-color: var(--accent); }
+
+  select { width: 100%; }
+  .meter { height: 10px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); transition: width 0.06s; }
+  .seg2 { display: flex; gap: 6px; }
+  .seg2 button { flex: 1; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+  .seg2 button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 </style>

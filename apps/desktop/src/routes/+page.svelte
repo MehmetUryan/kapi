@@ -6,6 +6,7 @@
   import { voice } from "$lib/voice.svelte";
   import { updater } from "$lib/updater.svelte";
   import { prefs } from "$lib/prefs.svelte";
+  import { desktop } from "$lib/desktop.svelte";
   import Login from "$lib/Login.svelte";
   import Lobby from "$lib/Lobby.svelte";
   import RoomView from "$lib/RoomView.svelte";
@@ -49,6 +50,7 @@
 
   onMount(() => {
     prefs.applyBg();
+    desktop.init();
     updater.check();
     const t = setInterval(() => updater.check(), 6 * 60 * 60 * 1000);
     return () => clearInterval(t);

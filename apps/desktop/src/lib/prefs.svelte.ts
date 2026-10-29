@@ -6,6 +6,13 @@ const K = {
   bg: "kapi.bg",
   veil: "kapi.bgVeil",
   blur: "kapi.bgBlur",
+  closeTray: "kapi.closeToTray",
+  micKey: "kapi.micKey",
+  micMode: "kapi.micMode",
+  mic: "kapi.micId",
+  speaker: "kapi.speakerId",
+  shareQ: "kapi.shareQuality",
+  userVol: "kapi.userVol",
 };
 
 export const THEMES = [
@@ -19,6 +26,8 @@ export const THEMES = [
 ] as const;
 
 export type ThemeId = (typeof THEMES)[number]["id"];
+export type ShareQuality = "light" | "balanced" | "high";
+export type MicMode = "toggle" | "hold";
 export const ACCENTS = ["#e8805a", "#e0567f", "#7c5ce0", "#5b9cf5", "#2fb67c", "#e6a23c"];
 
 function get(key: string): string | null {
@@ -64,6 +73,20 @@ function readTheme(): ThemeId {
   return THEMES.some((t) => t.id === v) ? (v as ThemeId) : "auto";
 }
 
+function readQuality(): ShareQuality {
+  const v = get(K.shareQ);
+  return v === "balanced" || v === "high" ? v : "light";
+}
+
+function readVol(): Record<string, number> {
+  try {
+    const v = JSON.parse(get(K.userVol) ?? "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 function inkFor(hex: string): string {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
   if (!m) return "#ffffff";
@@ -82,6 +105,13 @@ class Prefs {
   bg = $state<string | null>(get(K.bg));
   veil = $state(num(get(K.veil), 55));
   blur = $state(num(get(K.blur), 0));
+  closeToTray = $state(get(K.closeTray) !== "off");
+  micKey = $state(get(K.micKey) ?? "Ctrl+Shift+M");
+  micMode = $state<MicMode>(get(K.micMode) === "hold" ? "hold" : "toggle");
+  micId = $state(get(K.mic) ?? "");
+  speakerId = $state(get(K.speaker) ?? "");
+  shareQuality = $state<ShareQuality>(readQuality());
+  userVol = $state<Record<string, number>>(readVol());
 
   constructor() {
     if (typeof document !== "undefined") this.applyTheme();
@@ -101,6 +131,44 @@ class Prefs {
       ? this.muted.filter((x) => x !== roomId)
       : [...this.muted, roomId];
     set(K.muted, JSON.stringify(this.muted));
+  }
+
+  setCloseToTray(v: boolean) {
+    this.closeToTray = v;
+    set(K.closeTray, v ? "on" : "off");
+  }
+
+  setMicKey(key: string) {
+    this.micKey = key;
+    set(K.micKey, key);
+  }
+
+  setMicMode(m: MicMode) {
+    this.micMode = m;
+    set(K.micMode, m);
+  }
+
+  setMicId(id: string) {
+    this.micId = id;
+    set(K.mic, id);
+  }
+
+  setSpeakerId(id: string) {
+    this.speakerId = id;
+    set(K.speaker, id);
+  }
+
+  setShareQuality(q: ShareQuality) {
+    this.shareQuality = q;
+    set(K.shareQ, q);
+  }
+
+  setUserVol(id: string, v: number) {
+    const next = { ...this.userVol };
+    if (v >= 0.995) delete next[id];
+    else next[id] = Math.max(0, v);
+    this.userVol = next;
+    set(K.userVol, JSON.stringify(next));
   }
 
   setTheme(id: ThemeId) {

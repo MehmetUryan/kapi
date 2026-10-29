@@ -6,7 +6,9 @@ import {
   type RemoteParticipant,
 } from "livekit-client";
 import { api, type Room as AppRoom } from "./api";
+import { isTauri } from "./env";
 import { live } from "./live.svelte";
+import { prefs, type ShareQuality } from "./prefs.svelte";
 
 export type PState = { speaking: boolean; muted: boolean };
 export type Share = {
@@ -19,6 +21,15 @@ export type Share = {
 
 const SHARE_SOURCES = [Track.Source.ScreenShare, Track.Source.ScreenShareAudio];
 const ALONE_MS = 10 * 60 * 1000;
+
+const SHARE_PRESETS: Record<
+  ShareQuality,
+  { width: number; height: number; fps: number; bitrate: number }
+> = {
+  light: { width: 1280, height: 720, fps: 30, bitrate: 2_500_000 },
+  balanced: { width: 1920, height: 1080, fps: 30, bitrate: 4_000_000 },
+  high: { width: 1920, height: 1080, fps: 60, bitrate: 6_000_000 },
+};
 
 let audioCtx: AudioContext | null = null;
 function beep(freqs: number[]) {
@@ -45,7 +56,12 @@ function beep(freqs: number[]) {
     // ses çalınamadı
   }
 }
-const sounds = { join: () => beep([660, 880]), leave: () => beep([880, 660]) };
+const sounds = {
+  join: () => beep([660, 880]),
+  leave: () => beep([880, 660]),
+  micOn: () => beep([880]),
+  micOff: () => beep([520, 380]),
+};
 
 class Voice {
   joined = $state(false);
@@ -82,6 +98,7 @@ class Voice {
         adaptiveStream: false,
         dynacast: true,
         audioCaptureDefaults: {
+          deviceId: prefs.micId || undefined,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
@@ -132,6 +149,7 @@ class Voice {
             document.body.appendChild(el);
             this.audioEls.set(track, el);
             if (pub.source === Track.Source.ScreenShareAudio) this.applyVolume(p.identity);
+            if (pub.source === Track.Source.Microphone) this.applyUserVolume(p.identity);
           }
           sync();
         })
@@ -149,9 +167,13 @@ class Voice {
       for (const p of lk.remoteParticipants.values()) this.ensureSubs(p);
       try {
         await lk.localParticipant.setMicrophoneEnabled(true);
+        if (isTauri() && prefs.micMode === "hold" && prefs.micKey) {
+          await lk.localParticipant.setMicrophoneEnabled(false);
+        }
       } catch {
         this.error = "Mikrofona erişilemedi. Mikrofon iznini kontrol et.";
       }
+      if (prefs.speakerId) lk.switchActiveDevice("audiooutput", prefs.speakerId).catch(() => {});
       lk.startAudio().catch(() => {});
       this.room = target;
       this.joined = true;
@@ -168,14 +190,57 @@ class Voice {
     }
   }
 
-  async toggleMic() {
+  async setMic(on: boolean) {
     if (!this.lk) return;
     try {
-      await this.lk.localParticipant.setMicrophoneEnabled(!this.micOn);
+      await this.lk.localParticipant.setMicrophoneEnabled(on);
     } catch {
       this.error = "Mikrofon açılamadı";
     }
     this.sync();
+  }
+
+  toggleMic() {
+    return this.setMic(!this.micOn);
+  }
+
+  hotkeyToggle() {
+    if (!this.lk || !this.joined) return;
+    const next = !this.micOn;
+    void this.setMic(next);
+    if (next) sounds.micOn();
+    else sounds.micOff();
+  }
+
+  hotkeyHold(down: boolean) {
+    if (!this.lk || !this.joined) return;
+    if (down === this.micOn) return;
+    void this.setMic(down);
+  }
+
+  async setMicDevice(id: string) {
+    prefs.setMicId(id);
+    if (!this.lk) return;
+    try {
+      await this.lk.switchActiveDevice("audioinput", id || "default");
+    } catch {
+      this.error = "Mikrofon değiştirilemedi";
+    }
+  }
+
+  async setSpeakerDevice(id: string) {
+    prefs.setSpeakerId(id);
+    if (!this.lk) return;
+    try {
+      await this.lk.switchActiveDevice("audiooutput", id || "default");
+    } catch {
+      this.error = "Hoparlör değiştirilemedi";
+    }
+  }
+
+  setUserVolume(id: string, v: number) {
+    prefs.setUserVol(id, v);
+    this.applyUserVolume(id);
   }
 
   async toggleShare() {
@@ -189,10 +254,14 @@ class Voice {
           if (t) await lp.unpublishTrack(t, true);
         }
       } else {
+        const q = SHARE_PRESETS[prefs.shareQuality];
         await lp.setScreenShareEnabled(
           true,
-          { audio: this.shareAudio, resolution: { width: 1280, height: 720, frameRate: 30 } },
-          { screenShareEncoding: { maxBitrate: 2_500_000, maxFramerate: 30 } },
+          {
+            audio: this.shareAudio,
+            resolution: { width: q.width, height: q.height, frameRate: q.fps },
+          },
+          { screenShareEncoding: { maxBitrate: q.bitrate, maxFramerate: q.fps } },
         );
       }
     } catch {
@@ -246,6 +315,10 @@ class Voice {
       .get(id)
       ?.getTrackPublication(Track.Source.ScreenShareAudio);
     (pub?.track as RemoteAudioTrack | undefined)?.setVolume(this.volumes[id] ?? 1);
+  }
+
+  private applyUserVolume(id: string) {
+    this.lk?.remoteParticipants.get(id)?.setVolume(prefs.userVol[id] ?? 1);
   }
 
   private ensureSubs(p: RemoteParticipant) {

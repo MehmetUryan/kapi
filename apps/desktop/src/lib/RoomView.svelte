@@ -4,7 +4,8 @@
   import { api, type Msg, type Room, type User } from "$lib/api";
   import { live } from "$lib/live.svelte";
   import { voice } from "$lib/voice.svelte";
-  import { prefs } from "$lib/prefs.svelte";
+  import { prefs, type ShareQuality } from "$lib/prefs.svelte";
+  import { isTauri } from "$lib/env";
   import Avatar from "$lib/Avatar.svelte";
   import Toggle from "$lib/Toggle.svelte";
 
@@ -27,6 +28,7 @@
   let inputEl = $state<HTMLInputElement>();
   let emojiOpen = $state(false);
   let rxFor = $state<string | null>(null);
+  let volFor = $state<string | null>(null);
   let editingId = $state<string | null>(null);
   let editText = $state("");
   let delId = $state<string | null>(null);
@@ -218,12 +220,38 @@
     <div class="people">
       {#each voiceMembers as m (m.id)}
         {@const st = inThisVoice ? voice.people[m.id] : undefined}
+                {@const canVol = inThisVoice && m.id !== user.id}
         <div class="person">
-          <div class="face" class:speaking={st?.speaking}>
-            <Avatar name={m.username} id={m.id} v={m.avatarAt} size={shares.length ? 56 : 88} />
-            {#if st?.muted}<span class="badge">🔇</span>{/if}
-          </div>
-          <span>{m.username}</span>
+          <button
+            type="button"
+            class="pbtn"
+            title={canVol ? "Ses seviyesi için tıkla" : m.username}
+            onclick={() => {
+              if (canVol) volFor = volFor === m.id ? null : m.id;
+            }}
+          >
+            <span class="face" class:speaking={st?.speaking}>
+              <Avatar name={m.username} id={m.id} v={m.avatarAt} size={shares.length ? 56 : 88} />
+              {#if st?.muted}<span class="badge">🔇</span>{/if}
+            </span>
+            <span>
+              {m.username}{#if canVol && (prefs.userVol[m.id] ?? 1) < 1} · {Math.round((prefs.userVol[m.id] ?? 1) * 100)}%{/if}
+            </span>
+          </button>
+          {#if canVol && volFor === m.id}
+            <div class="vrow">
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={prefs.userVol[m.id] ?? 1}
+                oninput={(e) => voice.setUserVolume(m.id, Number(e.currentTarget.value))}
+              />
+              <button type="button" class="link" onclick={() => voice.setUserVolume(m.id, 0)}>Sustur</button>
+              <button type="button" class="link" onclick={() => voice.setUserVolume(m.id, 1)}>Sıfırla</button>
+            </div>
+          {/if}
         </div>
       {:else}
         <p class="muted">Şu an kimse seste değil.</p>
@@ -243,8 +271,20 @@
         <button onclick={() => voice.toggleMic()}>
           {voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}
         </button>
-        {#if !voice.sharing}
+        {#if isTauri() && prefs.micKey}
+          <small class="muted">{prefs.micMode === "hold" ? "Bas-konuş" : "Kısayol"}: {prefs.micKey}</small>
+        {/if}
+          {#if !voice.sharing}
           <Toggle bind:checked={voice.shareAudio} label="Ekran sesi" />
+          <select
+            title="Yayın kalitesi"
+            value={prefs.shareQuality}
+            onchange={(e) => prefs.setShareQuality(e.currentTarget.value as ShareQuality)}
+          >
+            <option value="light">Hafif · 720p 30fps (~1,1 GB/sa)</option>
+            <option value="balanced">Dengeli · 1080p 30fps (~1,8 GB/sa)</option>
+            <option value="high">Yüksek · 1080p 60fps (~2,7 GB/sa)</option>
+          </select>
         {/if}
         <button onclick={() => voice.toggleShare()}>
           {voice.sharing ? "Paylaşımı durdur" : "Ekran paylaş"}
@@ -392,7 +432,12 @@
   .vlabel { color: var(--muted); font-size: 0.8rem; }
   .people { display: flex; flex-wrap: wrap; gap: 24px; justify-content: center; }
   .person { display: flex; flex-direction: column; align-items: center; gap: 8px; font-weight: 600; }
-  .face { position: relative; padding: 4px; border-radius: 38%; transition: box-shadow 0.15s; }
+  .face { position: relative; display: inline-block; padding: 4px; border-radius: 38%; transition: box-shadow 0.15s; }
+  .pbtn { display: flex; flex-direction: column; align-items: center; gap: 8px; background: none; padding: 0; border-radius: 14px; color: inherit; font-weight: 600; }
+  .pbtn:hover { transform: none; }
+  .vrow { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+  .vrow input { width: 110px; padding: 0; border: 0; accent-color: var(--accent); }
+  .controls select { width: auto; font-size: 0.85rem; }
   .face.speaking { box-shadow: 0 0 0 4px #6cc49a; }
   .badge { position: absolute; right: -4px; bottom: -4px; font-size: 0.9rem; background: var(--surface); border-radius: 50%; padding: 2px; }
 

@@ -35,9 +35,20 @@ export type Msg = {
   reactions?: { emoji: string; users: string[] }[];
 };
 
-const K = { server: "kapi.server", token: "kapi.token" };
+const K = { server: "kapi.server", token: "kapi.token", migrated: "kapi.serverMigrated" };
 
-export const getServer = () => localStorage.getItem(K.server) ?? "http://localhost:3000";
+// Yayınlanan uygulamanın varsayılan sunucusu
+const DEFAULT_SERVER = import.meta.env.DEV ? "http://localhost:3000" : "https://desktop63.tail8e6588.ts.net";
+
+export const getServer = () => {
+  let saved = localStorage.getItem(K.server);
+  if (saved && /\.trycloudflare\.com/i.test(saved) && localStorage.getItem(K.migrated) !== "1") {
+    localStorage.setItem(K.migrated, "1");
+    localStorage.removeItem(K.server);
+    saved = null;
+  }
+  return saved ?? DEFAULT_SERVER;
+};
 export const setServer = (v: string) => localStorage.setItem(K.server, v.trim().replace(/\/+$/, ""));
 export const getToken = () => localStorage.getItem(K.token) ?? "";
 export const setSession = (token: string) => localStorage.setItem(K.token, token);
