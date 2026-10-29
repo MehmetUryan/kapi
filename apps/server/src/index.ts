@@ -3,7 +3,7 @@ import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { and, desc, eq, gt, isNull, lt, ne, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import {
@@ -11,6 +11,7 @@ import {
   invites,
   logs,
   messages,
+  reactions,
   resetCodes,
   roomMembers,
   rooms,
@@ -271,6 +272,10 @@ const roomBody = z.object({
   password: z.string().min(4).max(64).optional(),
 });
 const unlockBody = z.object({ password: z.string().max(100) });
+const editBody = z.object({ text: z.string().trim().min(1).max(2000) });
+const reactBody = z.object({
+  emoji: z.string().min(1).max(16).regex(/\p{Extended_Pictographic}/u),
+});
 const roleBody = z.object({ role: z.enum(["admin", "member"]) });
 const banBody = z.object({ banned: z.boolean() });
 const passwordBody = z.object({
@@ -579,6 +584,39 @@ app.post("/api/users/:id/ban", async (req, reply) => {
   return { ok: true };
 });
 
+app.delete("/api/users/:id", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const target = db.select().from(users).where(eq(users.id, id)).get();
+  if (!target) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
+  if (target.id === me.id) return reply.code(400).send({ error: "Kendi hesabını silemezsin" });
+  if (target.role === "owner") return reply.code(403).send({ error: "Kurucu silinemez" });
+  if (target.role === "admin" && me.role !== "owner") {
+    return reply.code(403).send({ error: "Yöneticileri sadece kurucu silebilir" });
+  }
+
+  for (const c of [...clients]) {
+    if (c.user.id === id) {
+      const voiceRoom = c.voiceRoomId;
+      c.close();
+      void kickFromVoice(voiceRoom, id);
+    }
+  }
+  db.run(
+    sql`DELETE FROM reactions WHERE user_id = ${id} OR message_id IN (SELECT id FROM messages WHERE user_id = ${id})`,
+  );
+  db.delete(messages).where(eq(messages.userId, id)).run();
+  db.delete(sessions).where(eq(sessions.userId, id)).run();
+  db.delete(roomMembers).where(eq(roomMembers.userId, id)).run();
+  db.delete(resetCodes).where(eq(resetCodes.userId, id)).run();
+  db.delete(users).where(eq(users.id, id)).run();
+  log("user_delete", me.id, `hedef: ${target.username}`);
+  for (const c of clients) c.send({ type: "rooms" });
+  broadcastPresence();
+  return { ok: true };
+});
+
 // ---------- odalar ----------
 app.get("/api/rooms", async (req, reply) => {
   const user = requireUser(req, reply);
@@ -652,6 +690,7 @@ app.get("/api/rooms/:id/messages", async (req, reply) => {
       username: users.username,
       avatarAt: users.avatarAt,
       text: messages.text,
+      editedAt: messages.editedAt,
       createdAt: messages.createdAt,
     })
     .from(messages)
@@ -660,7 +699,115 @@ app.get("/api/rooms/:id/messages", async (req, reply) => {
     .orderBy(desc(messages.createdAt))
     .limit(50)
     .all();
-  return rows.reverse();
+    const ids = rows.map((r) => r.id);
+  const rx = ids.length
+    ? db.select().from(reactions).where(inArray(reactions.messageId, ids)).all()
+    : [];
+  return rows.reverse().map((r) => ({
+    ...r,
+    reactions: groupReactions(rx.filter((x) => x.messageId === r.id)),
+  }));
+});
+
+function sendToRoom(roomId: string, data: unknown) {
+  for (const c of clients) if (c.roomId === roomId) c.send(data);
+}
+
+function groupReactions(rows: { emoji: string; userId: string }[]) {
+  const map = new Map<string, string[]>();
+  for (const r of rows) {
+    const list = map.get(r.emoji) ?? [];
+    list.push(r.userId);
+    map.set(r.emoji, list);
+  }
+  return [...map.entries()].map(([emoji, ids]) => ({ emoji, users: ids }));
+}
+
+app.patch("/api/messages/:id", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const body = editBody.parse(req.body);
+  const m = db.select().from(messages).where(eq(messages.id, id)).get();
+  if (!m) return reply.code(404).send({ error: "Mesaj bulunamadı" });
+  if (m.userId !== user.id) {
+    return reply.code(403).send({ error: "Sadece kendi mesajını düzenleyebilirsin" });
+  }
+  const room = db.select().from(rooms).where(eq(rooms.id, m.roomId)).get();
+  if (!room || !canAccess(room, user)) {
+    return reply.code(403).send({ error: "Bu odaya erişimin yok" });
+  }
+  const editedAt = now();
+  db.update(messages).set({ text: body.text, editedAt }).where(eq(messages.id, id)).run();
+  log("message_edit", user.id, `oda: ${room.name}`);
+  sendToRoom(m.roomId, { type: "message-edited", id, roomId: m.roomId, text: body.text, editedAt });
+  return { ok: true };
+});
+
+app.delete("/api/messages/:id", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const m = db.select().from(messages).where(eq(messages.id, id)).get();
+  if (!m) return reply.code(404).send({ error: "Mesaj bulunamadı" });
+  if (m.userId !== user.id && !isStaff(user)) {
+    return reply.code(403).send({ error: "Bu mesajı silemezsin" });
+  }
+  const room = db.select().from(rooms).where(eq(rooms.id, m.roomId)).get();
+  if (!room || !canAccess(room, user)) {
+    return reply.code(403).send({ error: "Bu odaya erişimin yok" });
+  }
+  db.delete(reactions).where(eq(reactions.messageId, id)).run();
+  db.delete(messages).where(eq(messages.id, id)).run();
+  if (m.userId === user.id) {
+    log("message_delete", user.id, `oda: ${room.name}`);
+  } else {
+    const author = db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, m.userId))
+      .get();
+    log("message_delete", user.id, `yazar: ${author?.username ?? "?"} · oda: ${room.name}`);
+  }
+  sendToRoom(m.roomId, { type: "message-deleted", id, roomId: m.roomId });
+  return { ok: true };
+});
+
+app.post("/api/messages/:id/reactions", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const body = reactBody.parse(req.body);
+  const m = db.select().from(messages).where(eq(messages.id, id)).get();
+  if (!m) return reply.code(404).send({ error: "Mesaj bulunamadı" });
+  const room = db.select().from(rooms).where(eq(rooms.id, m.roomId)).get();
+  if (!room || !canAccess(room, user)) {
+    return reply.code(403).send({ error: "Bu odaya erişimin yok" });
+  }
+  const same = and(
+    eq(reactions.messageId, id),
+    eq(reactions.userId, user.id),
+    eq(reactions.emoji, body.emoji),
+  );
+  if (db.select().from(reactions).where(same).get()) {
+    db.delete(reactions).where(same).run();
+  } else {
+    const kinds = new Set(
+      db
+        .select({ emoji: reactions.emoji })
+        .from(reactions)
+        .where(eq(reactions.messageId, id))
+        .all()
+        .map((r) => r.emoji),
+    );
+    if (!kinds.has(body.emoji) && kinds.size >= 20) {
+      return reply.code(400).send({ error: "Bu mesaja daha fazla farklı tepki eklenemez" });
+    }
+    db.insert(reactions).values({ messageId: id, userId: user.id, emoji: body.emoji }).run();
+  }
+  const all = db.select().from(reactions).where(eq(reactions.messageId, id)).all();
+  sendToRoom(m.roomId, { type: "reactions", id, roomId: m.roomId, reactions: groupReactions(all) });
+  return { ok: true };
 });
 
 app.delete("/api/rooms/:id", async (req, reply) => {
@@ -677,6 +824,7 @@ app.delete("/api/rooms/:id", async (req, reply) => {
       .send({ error: "Bu odayı sadece açan kişi ya da yöneticiler silebilir" });
   }
   db.delete(roomMembers).where(eq(roomMembers.roomId, id)).run();
+  db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
   log("room_delete", user.id, room.name);
@@ -771,11 +919,27 @@ app.get("/ws", { websocket: true }, (socket, req) => {
         createdAt: now(),
       };
       db.insert(messages).values(saved).run();
-      const out = {
+            const out = {
         type: "message",
-        message: { ...saved, username: client.user.username, avatarAt: client.user.avatarAt },
+        message: {
+          ...saved,
+          editedAt: null,
+          username: client.user.username,
+          avatarAt: client.user.avatarAt,
+        },
       };
-      for (const c of clients) if (c.roomId === client.roomId) c.send(out);
+      const room = db.select().from(rooms).where(eq(rooms.id, saved.roomId)).get();
+      const note = {
+        type: "activity",
+        roomId: saved.roomId,
+        roomName: room?.name ?? "",
+        username: client.user.username,
+        text: msg.text.slice(0, 120),
+      };
+      for (const c of clients) {
+        if (c.roomId === saved.roomId) c.send(out);
+        else if (c.user.id !== client.user.id && room && canAccess(room, c.user)) c.send(note);
+      }
     }
   });
 
@@ -792,6 +956,7 @@ function cleanup() {
   db.delete(logs).where(lt(logs.at, t - 90 * 86_400_000)).run();
   db.delete(voiceSessions).where(lt(voiceSessions.joinedAt, t - 120 * 86_400_000)).run();
   db.delete(resetCodes).where(lt(resetCodes.expiresAt, t)).run();
+  db.run(sql`DELETE FROM reactions WHERE message_id NOT IN (SELECT id FROM messages)`);
   for (const [k, b] of buckets) if (b.reset < t) buckets.delete(k);
 }
 

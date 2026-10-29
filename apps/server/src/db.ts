@@ -61,11 +61,18 @@ export const resetCodes = sqliteTable("reset_codes", {
   createdBy: text("created_by"),
 });
 
+export const reactions = sqliteTable("reactions", {
+  messageId: text("message_id").notNull(),
+  userId: text("user_id").notNull(),
+  emoji: text("emoji").notNull(),
+});
+
 export const messages = sqliteTable("messages", {
   id: text("id").primaryKey(),
   roomId: text("room_id").notNull(),
   userId: text("user_id").notNull(),
   text: text("text").notNull(),
+  editedAt: integer("edited_at"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -154,6 +161,21 @@ sqlite.exec(`
     expires_at INTEGER NOT NULL,
     created_by TEXT
   );
+`);
+
+const msgCols = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+if (!msgCols.some((c) => c.name === "edited_at")) {
+  sqlite.exec("ALTER TABLE messages ADD COLUMN edited_at INTEGER");
+}
+
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS reactions (
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (message_id, user_id, emoji)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reactions_msg ON reactions (message_id);
 `);
 
 export const db = drizzle(sqlite);

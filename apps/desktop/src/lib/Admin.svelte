@@ -15,6 +15,22 @@
   let confirmId = $state<string | null>(null);
   let resetInfo = $state<{ name: string; code: string; expiresAt: number } | null>(null);
   let timer: number | undefined;
+  let delId = $state<string | null>(null);
+  let delTimer: number | undefined;
+
+  function removeUser(u: AdminUser) {
+    if (delId !== u.id) {
+      delId = u.id;
+      clearTimeout(delTimer);
+      delTimer = window.setTimeout(() => (delId = null), 4000);
+      return;
+    }
+    delId = null;
+    guard(async () => {
+      await api(`/api/users/${u.id}`, { method: "DELETE" });
+      await loadPeople();
+    });
+  }
 
   const roleLabel = (r?: string) => (r === "owner" ? "Kurucu" : r === "admin" ? "Yönetici" : "Üye");
   const ACTIONS: Record<string, string> = {
@@ -32,6 +48,9 @@
     password_change: "şifresini değiştirdi",
     reset_code: "şifre sıfırlama kodu üretti",
     password_reset: "şifresini sıfırladı",
+    message_delete: "mesaj sildi",
+    message_edit: "mesajı düzenledi",
+    user_delete: "hesap sildi",
   };
   const when = (t: number) =>
     new Date(t).toLocaleString("tr-TR", {
@@ -145,7 +164,7 @@
           <Avatar name={u.username} id={u.id} v={u.avatarAt} size={36} />
           <div class="who">
             <b>{u.username}</b>
-            <small>{roleLabel(u.role)}{u.banned ? " · engelli" : ""}</small>
+            <small>{roleLabel(u.role)} · {new Date(u.createdAt).toLocaleDateString("tr-TR")}{u.banned ? " · engelli" : ""}</small>
           </div>
           <div class="acts">
             {#if user.role === "owner" && u.role !== "owner"}
@@ -155,7 +174,7 @@
                 <button onclick={() => setRole(u, "admin")}>Yönetici yap</button>
               {/if}
             {/if}
-            {#if canManage(u)}
+                        {#if canManage(u)}
               <button onclick={() => resetCode(u)}>Şifre kodu</button>
               {#if u.banned}
                 <button onclick={() => unban(u)}>Engeli kaldır</button>
@@ -164,6 +183,11 @@
                   {confirmId === u.id ? "Emin misin?" : "Engelle"}
                 </button>
               {/if}
+              <button
+                class="danger"
+                title="Hesabı, mesajlarını ve oturumlarını kalıcı olarak siler"
+                onclick={() => removeUser(u)}
+              >{delId === u.id ? "Kalıcı silinsin mi?" : "Hesabı sil"}</button>
             {/if}
           </div>
         </div>

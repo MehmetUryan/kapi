@@ -1,9 +1,12 @@
 import { api, wsUrl, type Msg, type User } from "./api";
+import { notify } from "./notify";
+import { prefs } from "./prefs.svelte";
 
 class Live {
   presence = $state<Record<string, User[]>>({});
   voice = $state<Record<string, User[]>>({});
   messages = $state<Msg[]>([]);
+  unread = $state<Record<string, number>>({});
   roomsVersion = $state(0);
   meVersion = $state(0);
   authLost = $state(false);
@@ -11,12 +14,14 @@ class Live {
   deletedRoomId = $state<string | null>(null);
 
   currentRoom: string | null = null;
+  private me = "";
   private voiceRoom: string | null = null;
   private ws: WebSocket | null = null;
   private retry: number | undefined;
   private stopped = true;
 
-  connect() {
+  connect(me: string) {
+    this.me = me;
     this.stopped = false;
     this.authLost = false;
     this.open();
@@ -31,6 +36,7 @@ class Live {
     this.presence = {};
     this.voice = {};
     this.messages = [];
+    this.unread = {};
     this.currentRoom = null;
     this.voiceRoom = null;
   }
@@ -55,6 +61,28 @@ class Live {
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
         this.messages = [...this.messages, data.message];
+        if (
+          !document.hasFocus() &&
+          data.message.userId !== this.me &&
+          !prefs.isMuted(data.message.roomId)
+        ) {
+          notify(data.message.username, data.message.text);
+        }
+      } else if (data.type === "message-edited" && data.roomId === this.currentRoom) {
+        this.messages = this.messages.map((m) =>
+          m.id === data.id ? { ...m, text: data.text, editedAt: data.editedAt } : m,
+        );
+      } else if (data.type === "message-deleted" && data.roomId === this.currentRoom) {
+        this.messages = this.messages.filter((m) => m.id !== data.id);
+      } else if (data.type === "reactions" && data.roomId === this.currentRoom) {
+        this.messages = this.messages.map((m) =>
+          m.id === data.id ? { ...m, reactions: data.reactions } : m,
+        );
+      } else if (data.type === "activity") {
+        this.unread = { ...this.unread, [data.roomId]: (this.unread[data.roomId] ?? 0) + 1 };
+        if (!prefs.isMuted(data.roomId)) {
+          notify(`${data.username} · ${data.roomName}`, data.text);
+        }
       }
     };
 
@@ -76,6 +104,7 @@ class Live {
 
   async enter(roomId: string) {
     this.currentRoom = roomId;
+    if (this.unread[roomId]) this.unread = { ...this.unread, [roomId]: 0 };
     this.messages = [];
     this.sendJson({ type: "join", roomId });
     const history = await api<Msg[]>(`/api/rooms/${roomId}/messages`);

@@ -31,6 +31,8 @@ export type Msg = {
   avatarAt: number | null;
   text: string;
   createdAt: number;
+  editedAt?: number | null;
+  reactions?: { emoji: string; users: string[] }[];
 };
 
 const K = { server: "kapi.server", token: "kapi.token" };

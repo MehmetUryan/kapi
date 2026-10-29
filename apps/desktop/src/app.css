@@ -1,4 +1,6 @@
-:root {
+:root,
+:root[data-theme="cream"] {
+  color-scheme: light;
   --bg: #fbf6ee;
   --surface: #fffdf9;
   --ink: #2f2a26;
@@ -7,11 +9,71 @@
   --soft: #f4ebdd;
   --accent: #e8805a;
   --accent-ink: #ffffff;
-  --radius: 20px;
   --shadow: 0 6px 24px rgba(80, 55, 30, 0.08);
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1a17;
+  --surface: #27221e;
+  --ink: #f3ece3;
+  --muted: #a89d91;
+  --line: #383029;
+  --soft: #322b25;
+  --accent: #e8805a;
+  --accent-ink: #ffffff;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+}
+:root[data-theme="midnight"] {
+  color-scheme: dark;
+  --bg: #0f1623;
+  --surface: #161f30;
+  --ink: #e6ecf7;
+  --muted: #8d9ab3;
+  --line: #243049;
+  --soft: #1d2840;
+  --accent: #6aa5ff;
+  --accent-ink: #08101f;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+:root[data-theme="forest"] {
+  color-scheme: dark;
+  --bg: #121a16;
+  --surface: #19241f;
+  --ink: #e4efe8;
+  --muted: #8fa598;
+  --line: #263a30;
+  --soft: #20302a;
+  --accent: #5fcf8f;
+  --accent-ink: #06150d;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+:root[data-theme="rose"] {
+  color-scheme: light;
+  --bg: #fff3f6;
+  --surface: #fffafb;
+  --ink: #3a2630;
+  --muted: #957a86;
+  --line: #f3d9e2;
+  --soft: #fbe6ed;
+  --accent: #e0567f;
+  --accent-ink: #ffffff;
+  --shadow: 0 6px 24px rgba(120, 40, 70, 0.08);
+}
+:root[data-theme="lavender"] {
+  color-scheme: light;
+  --bg: #f4f1fb;
+  --surface: #fcfbff;
+  --ink: #2a2540;
+  --muted: #7d7699;
+  --line: #e2dcf2;
+  --soft: #ebe6f8;
+  --accent: #7c5ce0;
+  --accent-ink: #ffffff;
+  --shadow: 0 6px 24px rgba(60, 40, 120, 0.08);
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-theme="auto"] {
+    color-scheme: dark;
     --bg: #1e1a17;
     --surface: #27221e;
     --ink: #f3ece3;
@@ -21,6 +83,10 @@
     --shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
   }
 }
+:root {
+  --radius: 20px;
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 body {
@@ -54,4 +120,23 @@ input:focus { border-color: var(--accent); }
   border: 1.5px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+/* kişisel arka plan resmi */
+#kapi-bg,
+#kapi-bg-veil {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+#kapi-bg {
+  background-size: cover;
+  background-position: center;
+  transform: scale(1.05);
+}
+#kapi-bg-veil { background: var(--bg); }
+html[data-bg="on"] .card {
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  backdrop-filter: blur(10px);
 }

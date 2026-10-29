@@ -5,6 +5,7 @@
   import { live } from "$lib/live.svelte";
   import { voice } from "$lib/voice.svelte";
   import { updater } from "$lib/updater.svelte";
+  import { prefs } from "$lib/prefs.svelte";
   import Login from "$lib/Login.svelte";
   import Lobby from "$lib/Lobby.svelte";
   import RoomView from "$lib/RoomView.svelte";
@@ -47,6 +48,7 @@
   });
 
   onMount(() => {
+    prefs.applyBg();
     updater.check();
     const t = setInterval(() => updater.check(), 6 * 60 * 60 * 1000);
     return () => clearInterval(t);
@@ -56,7 +58,7 @@
     if (getToken()) {
       try {
         const u = await api<User>("/api/me");
-        live.connect();
+        live.connect(u.id);
         user = u;
       } catch {
         // sunucuya ulaşılamadı ya da oturum geçersiz: giriş ekranı açılır
@@ -67,7 +69,7 @@
 
   function loggedIn(u: User) {
     notice = "";
-    live.connect();
+    live.connect(u.id);
     user = u;
   }
 

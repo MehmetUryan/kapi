@@ -3,6 +3,7 @@
   import { live } from "$lib/live.svelte";
   import { updater } from "$lib/updater.svelte";
   import Avatar from "$lib/Avatar.svelte";
+  import { prefs } from "$lib/prefs.svelte";
 
   let { user, onopen, onprofile, onadmin, onlogout }: {
     user: User;
@@ -142,7 +143,7 @@
     {#each rooms as r (r.id)}
       {@const talking = live.voice[r.id] ?? []}
       {@const viewing = live.presence[r.id] ?? []}
-      {@const people = talking.length ? talking : viewing}
+      {@const people = talking}
       <div class="cell">
         {#if unlockId === r.id}
           <form class="room card" onsubmit={(e) => unlock(e, r)}>
@@ -156,14 +157,14 @@
           </form>
         {:else}
           <button class="room card" onclick={() => pick(r)}>
-            <h2>{r.locked ? "🔒 " : ""}{r.name}</h2>
+              <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id)}>{live.unread[r.id]}</span>{/if}</h2>
             <div class="faces">
               {#each people.slice(0, 5) as p (p.id)}
                 <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
               {/each}
               {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
             </div>
-            <small>{talking.length ? `🔊 ${talking.length} kişi seste` : viewing.length ? `${viewing.length} kişi içeride` : "Şu an boş"}</small>
+            <small>{talking.length || viewing.length ? [talking.length ? `🔊 ${talking.length} seste` : "", viewing.length ? `💬 ${viewing.length} sohbette` : ""].filter(Boolean).join(" · ") : "Şu an boş"}</small>
           </button>
           {#if r.canDelete}
             <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
@@ -171,6 +172,13 @@
             </button>
           {/if}
         {/if}
+        {#if !r.locked || r.access}
+            <button
+              class="bell"
+              title={prefs.isMuted(r.id) ? "Bildirimleri aç" : "Bildirimleri kapat"}
+              onclick={() => prefs.toggleMute(r.id)}
+            >{prefs.isMuted(r.id) ? "🔕" : "🔔"}</button>
+          {/if}
       </div>
     {/each}
 
@@ -220,6 +228,7 @@
     justify-content: space-between;
   }
   .room h2 { margin: 0; font-size: 1.15rem; }
+  .unread { background: var(--accent); color: var(--accent-ink); border-radius: 999px; font-size: 0.75rem; padding: 1px 8px; vertical-align: middle; }
   .faces { display: flex; gap: 6px; align-items: center; min-height: 40px; }
   .more { color: var(--muted); font-weight: 600; }
   small { color: var(--muted); }
@@ -239,4 +248,7 @@
     color: var(--muted);
   }
   .del:hover { color: #d1495b; background: var(--soft); }
+    .unread.muted { background: var(--line); color: var(--muted); }
+  .bell { position: absolute; bottom: 10px; right: 10px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
+  .bell:hover { opacity: 1; background: var(--soft); transform: none; }
 </style>
