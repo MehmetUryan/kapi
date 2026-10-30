@@ -8,6 +8,7 @@ import { z } from "zod";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import {
   db,
+  friendships,
   invites,
   logs,
   messages,
@@ -28,9 +29,14 @@ try {
 }
 
 type Role = "owner" | "admin" | "member";
+type Status = "online" | "busy" | "away" | "invisible";
 type User = { id: string; username: string; avatarAt: number | null; role: Role };
+type Friend = { id: string; username: string; avatarAt: number | null };
 type Client = {
   user: User;
+  status: Status;
+  idle: boolean;
+  playing: string | null;
   roomId: string | null;
   voiceRoomId: string | null;
   voiceSessionId: string | null;
@@ -61,6 +67,12 @@ const userCols = {
 function toUser(r: { id: string; username: string; avatarAt: number | null; role: string }): User {
   return { id: r.id, username: r.username, avatarAt: r.avatarAt, role: r.role as Role };
 }
+
+const toFriend = (u: { id: string; username: string; avatarAt: number | null }): Friend => ({
+  id: u.id,
+  username: u.username,
+  avatarAt: u.avatarAt,
+});
 
 const isStaff = (u: User) => u.role === "owner" || u.role === "admin";
 
@@ -138,6 +150,7 @@ function requireOwner(req: FastifyRequest, reply: FastifyReply) {
 }
 
 function canAccess(room: RoomRow, user: User) {
+  if (room.kind === "dm") return room.dmA === user.id || room.dmB === user.id;
   if (!room.passwordHash) return true;
   if (user.role === "owner" || room.createdBy === user.id) return true;
   return !!db
@@ -160,6 +173,33 @@ async function kickFromVoice(roomId: string | null, userId: string) {
   } catch {
     // oturum zaten bitmiş olabilir
   }
+}
+
+// ---------- arkadaşlık ve DM yardımcıları ----------
+const pair = (a: string, b: string): [string, string] => (a < b ? [a, b] : [b, a]);
+
+function getFriendship(a: string, b: string) {
+  const [x, y] = pair(a, b);
+  return db
+    .select()
+    .from(friendships)
+    .where(and(eq(friendships.userA, x), eq(friendships.userB, y)))
+    .get();
+}
+
+const areFriends = (a: string, b: string) => getFriendship(a, b)?.status === "accepted";
+
+function notifyUsers(ids: string[], data: unknown) {
+  for (const c of clients) if (ids.includes(c.user.id)) c.send(data);
+}
+
+function dmRoom(a: string, b: string) {
+  const [x, y] = pair(a, b);
+  return db
+    .select()
+    .from(rooms)
+    .where(and(eq(rooms.kind, "dm"), eq(rooms.dmA, x), eq(rooms.dmB, y)))
+    .get();
 }
 
 // ---------- ses oturumu kaydı (kullanım sayacı için) ----------
@@ -226,6 +266,7 @@ function usage() {
   };
 }
 
+// ---------- varlık (kim nerede, kim çevrimiçi) ----------
 function presence() {
   const byRoom: Record<string, User[]> = {};
   for (const c of clients) {
@@ -253,6 +294,42 @@ function presenceMessage() {
 function broadcastPresence() {
   const msg = presenceMessage();
   for (const c of clients) c.send(msg);
+}
+
+type Person = Friend & { status: Status; playing: string | null };
+
+function peopleSnapshot(): Person[] {
+  const groups = new Map<string, Client[]>();
+  for (const c of clients) {
+    const list = groups.get(c.user.id) ?? [];
+    list.push(c);
+    groups.set(c.user.id, list);
+  }
+  const out: Person[] = [];
+  for (const list of groups.values()) {
+    const c0 = list[0];
+    if (c0.status === "invisible") continue;
+    const idle = list.every((c) => c.idle);
+    const status: Status = c0.status === "online" && idle ? "away" : c0.status;
+    out.push({
+      id: c0.user.id,
+      username: c0.user.username,
+      avatarAt: c0.user.avatarAt,
+      status,
+      playing: list.map((c) => c.playing).find((p) => !!p) ?? null,
+    });
+  }
+  return out;
+}
+
+let peopleTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePeople() {
+  if (peopleTimer) return;
+  peopleTimer = setTimeout(() => {
+    peopleTimer = null;
+    const msg = { type: "people", people: peopleSnapshot() };
+    for (const c of clients) c.send(msg);
+  }, 250);
 }
 
 // ---------- mesaj yardımcıları ----------
@@ -351,6 +428,8 @@ const historyQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 const searchQuery = z.object({ q: z.string().trim().min(2).max(60) });
+const friendBody = z.object({ username: z.string().trim().min(3).max(20) });
+const dmBody = z.object({ userId: z.string().min(1).max(64) });
 const roleBody = z.object({ role: z.enum(["admin", "member"]) });
 const banBody = z.object({ banned: z.boolean() });
 const passwordBody = z.object({
@@ -376,6 +455,9 @@ const clientMsg = z.discriminatedUnion("type", [
   z.object({ type: z.literal("leave") }),
   z.object({ type: z.literal("voice"), roomId: z.string().nullable() }),
   z.object({ type: z.literal("typing") }),
+  z.object({ type: z.literal("status"), status: z.enum(["online", "busy", "away", "invisible"]) }),
+  z.object({ type: z.literal("idle"), idle: z.boolean() }),
+  z.object({ type: z.literal("playing"), text: z.string().trim().max(60).nullable() }),
   z.object({
     type: z.literal("say"),
     text: z.string().trim().min(1).max(2000),
@@ -553,6 +635,8 @@ app.patch("/api/me", async (req, reply) => {
   const fresh = publicUser(user.id) ?? user;
   for (const c of clients) if (c.user.id === user.id) c.user = fresh;
   broadcastPresence();
+  schedulePeople();
+  notifyUsers([], null);
   return fresh;
 });
 
@@ -577,6 +661,179 @@ app.get("/api/members", async (req, reply) => {
     .where(eq(users.banned, 0))
     .orderBy(users.username)
     .all();
+});
+
+// ---------- arkadaşlar ----------
+app.get("/api/friends", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const rows = db
+    .select()
+    .from(friendships)
+    .where(or(eq(friendships.userA, me.id), eq(friendships.userB, me.id)))
+    .all();
+  const otherOf = (r: (typeof rows)[number]) => (r.userA === me.id ? r.userB : r.userA);
+  const ids = rows.map(otherOf);
+  const info = new Map(
+    (ids.length
+      ? db
+          .select({ id: users.id, username: users.username, avatarAt: users.avatarAt })
+          .from(users)
+          .where(and(inArray(users.id, ids), eq(users.banned, 0)))
+          .all()
+      : []
+    ).map((u) => [u.id, u] as [string, Friend]),
+  );
+  const friends: Friend[] = [];
+  const incoming: Friend[] = [];
+  const outgoing: Friend[] = [];
+  for (const r of rows) {
+    const u = info.get(otherOf(r));
+    if (!u) continue;
+    if (r.status === "accepted") friends.push(toFriend(u));
+    else if (r.requestedBy === me.id) outgoing.push(toFriend(u));
+    else incoming.push(toFriend(u));
+  }
+  return { friends, incoming, outgoing };
+});
+
+app.post("/api/friends/request", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const body = friendBody.parse(req.body);
+  const target = db
+    .select({ id: users.id, username: users.username })
+    .from(users)
+    .where(and(eq(users.username, body.username), eq(users.banned, 0)))
+    .get();
+  if (!target) return reply.code(404).send({ error: "Böyle bir kullanıcı yok" });
+  if (target.id === me.id) return reply.code(400).send({ error: "Kendini ekleyemezsin" });
+
+  const ex = getFriendship(me.id, target.id);
+  if (ex?.status === "accepted") return reply.code(409).send({ error: "Zaten arkadaşsınız" });
+  if (ex) {
+    if (ex.requestedBy === me.id) return reply.code(409).send({ error: "İstek zaten gönderilmiş" });
+    db.update(friendships)
+      .set({ status: "accepted" })
+      .where(and(eq(friendships.userA, ex.userA), eq(friendships.userB, ex.userB)))
+      .run();
+    notifyUsers([me.id, target.id], { type: "friends" });
+    return { status: "accepted" };
+  }
+
+  const pending = db
+    .select()
+    .from(friendships)
+    .where(and(eq(friendships.requestedBy, me.id), eq(friendships.status, "pending")))
+    .all().length;
+  if (pending >= 20) {
+    return reply.code(429).send({ error: "Çok fazla bekleyen isteğin var" });
+  }
+  const [a, b] = pair(me.id, target.id);
+  db.insert(friendships)
+    .values({ userA: a, userB: b, status: "pending", requestedBy: me.id, createdAt: now() })
+    .run();
+  notifyUsers([me.id, target.id], { type: "friends" });
+  return { status: "sent" };
+});
+
+app.post("/api/friends/:id/accept", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const f = getFriendship(me.id, id);
+  if (!f || f.status !== "pending" || f.requestedBy === me.id) {
+    return reply.code(404).send({ error: "İstek bulunamadı" });
+  }
+  db.update(friendships)
+    .set({ status: "accepted" })
+    .where(and(eq(friendships.userA, f.userA), eq(friendships.userB, f.userB)))
+    .run();
+  notifyUsers([me.id, id], { type: "friends" });
+  return { ok: true };
+});
+
+app.delete("/api/friends/:id", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const f = getFriendship(me.id, id);
+  if (f) {
+    db.delete(friendships)
+      .where(and(eq(friendships.userA, f.userA), eq(friendships.userB, f.userB)))
+      .run();
+    notifyUsers([me.id, id], { type: "friends" });
+  }
+  return { ok: true };
+});
+
+// ---------- özel mesajlar (DM) ----------
+app.post("/api/dms", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const body = dmBody.parse(req.body);
+  const peer = db
+    .select({ id: users.id, username: users.username, avatarAt: users.avatarAt })
+    .from(users)
+    .where(and(eq(users.id, body.userId), eq(users.banned, 0)))
+    .get();
+  if (!peer) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
+  if (peer.id === me.id) return reply.code(400).send({ error: "Kendine mesaj atamazsın" });
+
+  let room = dmRoom(me.id, peer.id);
+  if (!room) {
+    if (!areFriends(me.id, peer.id)) {
+      return reply.code(403).send({ error: "Önce arkadaş olmanız gerekiyor" });
+    }
+    const [x, y] = pair(me.id, peer.id);
+    const id = randomUUID();
+    db.insert(rooms)
+      .values({ id, name: "dm", createdAt: now(), createdBy: me.id, kind: "dm", dmA: x, dmB: y })
+      .run();
+    room = dmRoom(me.id, peer.id);
+  }
+  if (!room) return reply.code(500).send({ error: "Görüşme açılamadı" });
+  return { id: room.id, name: peer.username, peer: toFriend(peer) };
+});
+
+app.get("/api/dms", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const rs = db
+    .select()
+    .from(rooms)
+    .where(and(eq(rooms.kind, "dm"), or(eq(rooms.dmA, me.id), eq(rooms.dmB, me.id))))
+    .all();
+  const out: {
+    id: string;
+    user: Friend;
+    lastText: string;
+    lastAt: number;
+    lastMine: boolean;
+  }[] = [];
+  for (const r of rs) {
+    const peerId = r.dmA === me.id ? r.dmB : r.dmA;
+    if (!peerId) continue;
+    const peer = publicUser(peerId);
+    if (!peer) continue;
+    const last = db
+      .select({ text: messages.text, createdAt: messages.createdAt, userId: messages.userId })
+      .from(messages)
+      .where(eq(messages.roomId, r.id))
+      .orderBy(desc(messages.createdAt))
+      .limit(1)
+      .get();
+    if (!last) continue;
+    out.push({
+      id: r.id,
+      user: toFriend(peer),
+      lastText: last.text.slice(0, 80),
+      lastAt: last.createdAt,
+      lastMine: last.userId === me.id,
+    });
+  }
+  out.sort((a, b) => b.lastAt - a.lastAt);
+  return out;
 });
 
 // ---------- yönetim ----------
@@ -695,6 +952,11 @@ app.delete("/api/users/:id", async (req, reply) => {
       void kickFromVoice(voiceRoom, id);
     }
   }
+  const dmIds = sql`(SELECT id FROM rooms WHERE kind = 'dm' AND (dm_a = ${id} OR dm_b = ${id}))`;
+  db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id IN ${dmIds})`);
+  db.run(sql`DELETE FROM messages WHERE room_id IN ${dmIds}`);
+  db.run(sql`DELETE FROM rooms WHERE kind = 'dm' AND (dm_a = ${id} OR dm_b = ${id})`);
+  db.run(sql`DELETE FROM friendships WHERE user_a = ${id} OR user_b = ${id}`);
   db.run(
     sql`DELETE FROM reactions WHERE user_id = ${id} OR message_id IN (SELECT id FROM messages WHERE user_id = ${id})`,
   );
@@ -704,7 +966,11 @@ app.delete("/api/users/:id", async (req, reply) => {
   db.delete(resetCodes).where(eq(resetCodes.userId, id)).run();
   db.delete(users).where(eq(users.id, id)).run();
   log("user_delete", me.id, `hedef: ${target.username}`);
-  for (const c of clients) c.send({ type: "rooms" });
+  for (const c of clients) {
+    c.send({ type: "rooms" });
+    c.send({ type: "friends" });
+    c.send({ type: "dms" });
+  }
   broadcastPresence();
   return { ok: true };
 });
@@ -713,7 +979,7 @@ app.delete("/api/users/:id", async (req, reply) => {
 app.get("/api/rooms", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
-  const all = db.select().from(rooms).orderBy(rooms.createdAt).all();
+  const all = db.select().from(rooms).where(eq(rooms.kind, "room")).orderBy(rooms.createdAt).all();
   return all.map((r, i) => ({
     id: r.id,
     name: r.name,
@@ -839,7 +1105,7 @@ app.patch("/api/messages/:id", async (req, reply) => {
   }
   const editedAt = now();
   db.update(messages).set({ text: body.text, editedAt }).where(eq(messages.id, id)).run();
-  log("message_edit", user.id, `oda: ${room.name}`);
+  if (room.kind !== "dm") log("message_edit", user.id, `oda: ${room.name}`);
   sendToRoom(m.roomId, { type: "message-edited", id, roomId: m.roomId, text: body.text, editedAt });
   return { ok: true };
 });
@@ -859,17 +1125,20 @@ app.delete("/api/messages/:id", async (req, reply) => {
   }
   db.delete(reactions).where(eq(reactions.messageId, id)).run();
   db.delete(messages).where(eq(messages.id, id)).run();
-  if (m.userId === user.id) {
-    log("message_delete", user.id, `oda: ${room.name}`);
-  } else {
-    const author = db
-      .select({ username: users.username })
-      .from(users)
-      .where(eq(users.id, m.userId))
-      .get();
-    log("message_delete", user.id, `yazar: ${author?.username ?? "?"} · oda: ${room.name}`);
+  if (room.kind !== "dm") {
+    if (m.userId === user.id) {
+      log("message_delete", user.id, `oda: ${room.name}`);
+    } else {
+      const author = db
+        .select({ username: users.username })
+        .from(users)
+        .where(eq(users.id, m.userId))
+        .get();
+      log("message_delete", user.id, `yazar: ${author?.username ?? "?"} · oda: ${room.name}`);
+    }
   }
   sendToRoom(m.roomId, { type: "message-deleted", id, roomId: m.roomId });
+  if (room.kind === "dm" && room.dmA && room.dmB) notifyUsers([room.dmA, room.dmB], { type: "dms" });
   return { ok: true };
 });
 
@@ -916,7 +1185,8 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   const { id } = req.params as { id: string };
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
   if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
-  const first = db.select().from(rooms).orderBy(rooms.createdAt).get();
+  if (room.kind === "dm") return reply.code(403).send({ error: "Özel görüşme silinemez" });
+  const first = db.select().from(rooms).where(eq(rooms.kind, "room")).orderBy(rooms.createdAt).get();
   if (first?.id === id) return reply.code(403).send({ error: "Genel oda silinemez" });
   if (room.createdBy !== user.id && !isStaff(user)) {
     return reply
@@ -968,9 +1238,18 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     return;
   }
 
+  const savedStatus = (db
+    .select({ status: users.status })
+    .from(users)
+    .where(eq(users.id, user.id))
+    .get()?.status ?? "online") as Status;
+
   let lastTyping = 0;
   const client: Client = {
     user,
+    status: savedStatus,
+    idle: false,
+    playing: null,
     roomId: null,
     voiceRoomId: null,
     voiceSessionId: null,
@@ -981,6 +1260,9 @@ app.get("/ws", { websocket: true }, (socket, req) => {
   };
   clients.add(client);
   client.send(presenceMessage());
+  client.send({ type: "people", people: peopleSnapshot() });
+  client.send({ type: "my-status", status: savedStatus });
+  schedulePeople();
 
   socket.on("message", (raw: Buffer) => {
     let msg: z.infer<typeof clientMsg>;
@@ -1010,6 +1292,21 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       }
       client.voiceRoomId = msg.roomId;
       broadcastPresence();
+    } else if (msg.type === "status") {
+      db.update(users).set({ status: msg.status }).where(eq(users.id, client.user.id)).run();
+      for (const c of clients) {
+        if (c.user.id === client.user.id) {
+          c.status = msg.status;
+          c.send({ type: "my-status", status: msg.status });
+        }
+      }
+      schedulePeople();
+    } else if (msg.type === "idle") {
+      client.idle = msg.idle;
+      schedulePeople();
+    } else if (msg.type === "playing") {
+      client.playing = msg.text ? msg.text : null;
+      schedulePeople();
     } else if (msg.type === "typing") {
       if (!client.roomId) return;
       const t = now();
@@ -1056,19 +1353,22 @@ app.get("/ws", { websocket: true }, (socket, req) => {
         },
       };
       const room = db.select().from(rooms).where(eq(rooms.id, saved.roomId)).get();
+      const isDm = room?.kind === "dm";
       for (const c of clients) {
         if (c.roomId === saved.roomId) c.send(out);
         else if (c.user.id !== client.user.id && room && canAccess(room, c.user)) {
           c.send({
             type: "activity",
             roomId: saved.roomId,
-            roomName: room.name,
+            roomName: isDm ? "Özel mesaj" : room.name,
+            dm: isDm,
             username: client.user.username,
             text: msg.text.slice(0, 120),
-            mention: mentions.includes(c.user.id),
+            mention: !isDm && mentions.includes(c.user.id),
           });
         }
       }
+      if (isDm && room?.dmA && room.dmB) notifyUsers([room.dmA, room.dmB], { type: "dms" });
     }
   });
 
@@ -1076,6 +1376,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     endVoice(client);
     clients.delete(client);
     broadcastPresence();
+    schedulePeople();
   });
 });
 
@@ -1100,7 +1401,7 @@ cleanup();
 setInterval(cleanup, 24 * 3_600_000);
 
 // ---------- başlangıç ----------
-if (!db.select().from(rooms).get()) {
+if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
   db.insert(rooms).values({ id: randomUUID(), name: "Genel", createdAt: now() }).run();
 }
 

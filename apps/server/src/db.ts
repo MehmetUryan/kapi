@@ -10,6 +10,7 @@ export const users = sqliteTable("users", {
   avatarAt: integer("avatar_at"),
   role: text("role").notNull().default("member"),
   banned: integer("banned").notNull().default(0),
+  status: text("status").notNull().default("online"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -31,6 +32,9 @@ export const rooms = sqliteTable("rooms", {
   createdAt: integer("created_at").notNull(),
   createdBy: text("created_by"),
   passwordHash: text("password_hash"),
+  kind: text("kind").notNull().default("room"),
+  dmA: text("dm_a"),
+  dmB: text("dm_b"), 
 });
 
 export const roomMembers = sqliteTable("room_members", {
@@ -65,6 +69,14 @@ export const reactions = sqliteTable("reactions", {
   messageId: text("message_id").notNull(),
   userId: text("user_id").notNull(),
   emoji: text("emoji").notNull(),
+});
+
+export const friendships = sqliteTable("friendships", {
+  userA: text("user_a").notNull(),
+  userB: text("user_b").notNull(),
+  status: text("status").notNull(),
+  requestedBy: text("requested_by").notNull(),
+  createdAt: integer("created_at").notNull(),
 });
 
 export const messages = sqliteTable("messages", {
@@ -183,5 +195,27 @@ const msgCols2 = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: 
 if (!msgCols2.some((c) => c.name === "reply_to")) {
   sqlite.exec("ALTER TABLE messages ADD COLUMN reply_to TEXT");
 }
+
+const userCols3 = sqlite.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+if (!userCols3.some((c) => c.name === "status")) {
+  sqlite.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'online'");
+}
+const roomCols2 = sqlite.prepare("PRAGMA table_info(rooms)").all() as { name: string }[];
+if (!roomCols2.some((c) => c.name === "kind")) {
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN kind TEXT NOT NULL DEFAULT 'room'");
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN dm_a TEXT");
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN dm_b TEXT");
+}
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS friendships (
+    user_a TEXT NOT NULL,
+    user_b TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_a, user_b)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_pair ON rooms (dm_a, dm_b) WHERE kind = 'dm';
+`);
 
 export const db = drizzle(sqlite);

@@ -1,10 +1,13 @@
-import { api, wsUrl, type Member, type Msg, type User } from "./api";
+import { api, wsUrl, type Member, type Msg, type Person, type Status, type User } from "./api";
 import { notify } from "./notify";
 import { prefs } from "./prefs.svelte";
 
 class Live {
   presence = $state<Record<string, User[]>>({});
   voice = $state<Record<string, User[]>>({});
+  people = $state<Person[]>([]);
+  myStatus = $state<Status>("online");
+  playing = $state<string | null>(null);
   messages = $state<Msg[]>([]);
   members = $state<Member[]>([]);
   typers = $state<{ id: string; name: string; until: number }[]>([]);
@@ -13,6 +16,8 @@ class Live {
   hasMore = $state(false);
   loadingOlder = $state(false);
   roomsVersion = $state(0);
+  friendsVersion = $state(0);
+  dmsVersion = $state(0);
   meVersion = $state(0);
   authLost = $state(false);
   connected = $state(false);
@@ -21,6 +26,7 @@ class Live {
   currentRoom: string | null = null;
   private me = "";
   private voiceRoom: string | null = null;
+  private idleFlag = false;
   private ws: WebSocket | null = null;
   private retry: number | undefined;
   private stopped = true;
@@ -41,6 +47,10 @@ class Live {
     this.connected = false;
     this.presence = {};
     this.voice = {};
+    this.people = [];
+    this.myStatus = "online";
+    this.playing = null;
+    this.idleFlag = false;
     this.messages = [];
     this.typers = [];
     this.unread = {};
@@ -58,6 +68,8 @@ class Live {
       this.connected = true;
       if (this.currentRoom) this.sendJson({ type: "join", roomId: this.currentRoom });
       if (this.voiceRoom) this.sendJson({ type: "voice", roomId: this.voiceRoom });
+      if (this.idleFlag) this.sendJson({ type: "idle", idle: true });
+      if (this.playing) this.sendJson({ type: "playing", text: this.playing });
     };
 
     ws.onmessage = (e) => {
@@ -65,7 +77,11 @@ class Live {
       if (data.type === "presence") {
         this.presence = data.rooms;
         this.voice = data.voice ?? {};
-      } else if (data.type === "rooms") this.roomsVersion++;
+      } else if (data.type === "people") this.people = data.people;
+      else if (data.type === "my-status") this.myStatus = data.status;
+      else if (data.type === "rooms") this.roomsVersion++;
+      else if (data.type === "friends") this.friendsVersion++;
+      else if (data.type === "dms") this.dmsVersion++;
       else if (data.type === "me") this.meVersion++;
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
@@ -94,6 +110,7 @@ class Live {
         this.addTyper(data.userId, data.username);
       } else if (data.type === "activity") {
         this.unread = { ...this.unread, [data.roomId]: (this.unread[data.roomId] ?? 0) + 1 };
+        const title = data.dm ? data.username : `${data.username} · ${data.roomName}`;
         if (data.mention) {
           this.mentionUnread = {
             ...this.mentionUnread,
@@ -101,7 +118,7 @@ class Live {
           };
           notify(`${data.username} seni andı · ${data.roomName}`, data.text);
         } else if (!prefs.isMuted(data.roomId)) {
-          notify(`${data.username} · ${data.roomName}`, data.text);
+          notify(title, data.text);
         }
       }
     };
@@ -192,6 +209,22 @@ class Live {
   setVoice(roomId: string | null) {
     this.voiceRoom = roomId;
     this.sendJson({ type: "voice", roomId });
+  }
+
+  setStatus(status: Status) {
+    this.myStatus = status;
+    this.sendJson({ type: "status", status });
+  }
+
+  setIdle(idle: boolean) {
+    this.idleFlag = idle;
+    this.sendJson({ type: "idle", idle });
+  }
+
+  setPlaying(text: string | null) {
+    if (text === this.playing) return;
+    this.playing = text;
+    this.sendJson({ type: "playing", text });
   }
 
   say(text: string, replyTo: string | null = null) {

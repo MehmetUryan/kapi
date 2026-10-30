@@ -2,16 +2,17 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { api, clearSession, getToken, type Room, type User } from "$lib/api";
-  import { live } from "$lib/live.svelte";
-  import { voice } from "$lib/voice.svelte";
-  import { updater } from "$lib/updater.svelte";
-  import { prefs } from "$lib/prefs.svelte";
   import { desktop } from "$lib/desktop.svelte";
-  import Login from "$lib/Login.svelte";
-  import Lobby from "$lib/Lobby.svelte";
-  import RoomView from "$lib/RoomView.svelte";
-  import Profile from "$lib/Profile.svelte";
+  import { live } from "$lib/live.svelte";
+  import { prefs } from "$lib/prefs.svelte";
+  import { social } from "$lib/social.svelte";
+  import { updater } from "$lib/updater.svelte";
+  import { voice } from "$lib/voice.svelte";
   import Admin from "$lib/Admin.svelte";
+  import Lobby from "$lib/Lobby.svelte";
+  import Login from "$lib/Login.svelte";
+  import Profile from "$lib/Profile.svelte";
+  import RoomView from "$lib/RoomView.svelte";
   import UpdateBanner from "$lib/UpdateBanner.svelte";
   import VoiceBar from "$lib/VoiceBar.svelte";
 
@@ -62,6 +63,7 @@
         const u = await api<User>("/api/me");
         live.connect(u.id);
         user = u;
+        social.start();
       } catch {
         // sunucuya ulaşılamadı ya da oturum geçersiz: giriş ekranı açılır
       }
@@ -73,10 +75,12 @@
     notice = "";
     live.connect(u.id);
     user = u;
+    social.start();
   }
 
   function logout() {
     voice.leave();
+    social.stop();
     live.disconnect();
     clearSession();
     user = null;
@@ -96,21 +100,25 @@
 
 {#if ready}
   {#if !user}
-    <Login onlogin={loggedIn} {notice} />
+    <div class="scrollpage"><Login onlogin={loggedIn} {notice} /></div>
   {:else if room}
     <RoomView {room} {user} onback={() => (room = null)} />
   {:else if profile}
-    <Profile {user} onback={() => (profile = false)} onsaved={(u) => (user = u)} />
+    <div class="scrollpage">
+      <Profile {user} onback={() => (profile = false)} onsaved={(u) => (user = u)} />
+    </div>
   {:else if admin}
-    <Admin {user} onback={() => (admin = false)} />
+    <div class="scrollpage"><Admin {user} onback={() => (admin = false)} /></div>
   {:else}
-    <Lobby
-      {user}
-      onopen={(r) => (room = r)}
-      onprofile={() => (profile = true)}
-      onadmin={() => (admin = true)}
-      onlogout={logout}
-    />
+    <div class="scrollpage">
+      <Lobby
+        {user}
+        onopen={(r) => (room = r)}
+        onprofile={() => (profile = true)}
+        onadmin={() => (admin = true)}
+        onlogout={logout}
+      />
+    </div>
   {/if}
 
   {#if user && !room}

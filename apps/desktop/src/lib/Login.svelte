@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, getServer, setServer, setSession, type User } from "$lib/api";
+  import PasswordInput from "$lib/PasswordInput.svelte";
 
   let { onlogin, notice = "" }: { onlogin: (u: User) => void; notice?: string } = $props();
 
@@ -54,14 +55,13 @@
 
     <label>Sunucu <input bind:value={server} placeholder="http://localhost:3000" /></label>
     <label>Kullanıcı adı <input bind:value={username} autocomplete="username" /></label>
-    <label>
-      {mode === "reset" ? "Yeni şifre" : "Şifre"}
-      <input
-        type="password"
+    <div class="field">
+      <small>{mode === "reset" ? "Yeni şifre" : "Şifre"}</small>
+      <PasswordInput
         bind:value={password}
         autocomplete={mode === "login" ? "current-password" : "new-password"}
       />
-    </label>
+    </div>
     {#if mode === "register"}
       <label>Davet kodu <input bind:value={invite} /></label>
       <small>Kullanıcı adı 3-20 karakter (harf, rakam, _). Şifre en az 8 karakter.</small>
@@ -85,11 +85,12 @@
 </main>
 
 <style>
-  .wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+  .wrap { min-height: 100%; display: grid; place-items: center; padding: 20px; }
   .box { width: 100%; max-width: 380px; padding: 28px; display: flex; flex-direction: column; gap: 12px; }
   h1 { margin: 0; font-size: 2rem; }
   .sub { margin: 0 0 6px; color: var(--muted); }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
   small { color: var(--muted); }
   .err { margin: 0; color: #d1495b; }
   .link { background: none; color: var(--accent); text-decoration: underline; padding: 0.2rem; }

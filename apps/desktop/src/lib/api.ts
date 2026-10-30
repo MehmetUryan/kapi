@@ -22,6 +22,8 @@ export type Room = {
   locked?: boolean;
   access?: boolean;
   canDelete?: boolean;
+  kind?: "room" | "dm";
+  peer?: Friend;
 };
 export type Msg = {
   id: string;
@@ -84,3 +86,14 @@ export async function api<T>(
   return data as T;
 }
 export type Member = { id: string; username: string; avatarAt: number | null };
+export type Status = "online" | "busy" | "away" | "invisible";
+export type Friend = { id: string; username: string; avatarAt: number | null };
+export type Person = Friend & { status: Status; playing: string | null };
+export type FriendsState = { friends: Friend[]; incoming: Friend[]; outgoing: Friend[] };
+export type Dm = {
+  id: string;
+  user: Friend;
+  lastText: string;
+  lastAt: number;
+  lastMine: boolean;
+};

@@ -3,17 +3,25 @@
   import { api, type User } from "$lib/api";
   import { desktop } from "$lib/desktop.svelte";
   import { devices } from "$lib/devices.svelte";
-  import { ACCENTS, THEMES, prefs } from "$lib/prefs.svelte";
+  import { ACCENTS, THEMES, prefs, type KeyAction } from "$lib/prefs.svelte";
   import { voice } from "$lib/voice.svelte";
   import Avatar from "$lib/Avatar.svelte";
-  import Toggle from "$lib/Toggle.svelte";
+  import PasswordInput from "$lib/PasswordInput.svelte";
   import Select from "$lib/Select.svelte";
+  import PlayingSettings from "$lib/PlayingSettings.svelte";
+  import Toggle from "$lib/Toggle.svelte";
 
   let { user, onback, onsaved }: {
     user: User;
     onback: () => void;
     onsaved: (u: User) => void;
   } = $props();
+
+  const KEYROWS: { id: KeyAction; name: string; desc: string }[] = [
+    { id: "toggle", name: "Mikrofonu aç / kapat", desc: "Tuşa her basışta açılır ya da kapanır." },
+    { id: "ptt", name: "Bas-konuş", desc: "Basılı tuttuğun sürece mikrofon açık olur." },
+    { id: "deafen", name: "Duymayı kapat", desc: "Karşıdakileri duymayı keser, mikrofonu da kapatır." },
+  ];
 
   let username = $state(untrack(() => user.username));
   let error = $state("");
@@ -40,13 +48,13 @@
   let raf = 0;
 
   // kısayol kaydı
-  let recording = $state(false);
+  let recFor = $state<KeyAction | null>(null);
   let keyHint = $state("");
 
   const canSink =
     typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
 
-      const micOpts = $derived([
+  const micOpts = $derived([
     { value: "", label: "Varsayılan" },
     ...devices.mics
       .filter((d) => d.deviceId !== "default" && d.deviceId !== "communications")
@@ -221,9 +229,18 @@
   }
 
   // ---- kısayol kaydı ----
+  const NAMED = new Set([
+    "Space", "Enter", "Tab", "Backspace", "Insert", "Delete", "Home", "End",
+    "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Backquote", "Minus", "Equal", "CapsLock", "ScrollLock", "Pause",
+    "NumpadAdd", "NumpadSubtract", "NumpadMultiply", "NumpadDivide",
+    "NumpadDecimal", "NumpadEnter",
+  ]);
+
   function parseKey(e: KeyboardEvent): { accel?: string; wait?: boolean; error?: string } {
     const code = e.code;
     if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(code)) return { wait: true };
+    if (e.metaKey) return { error: "Windows tuşu kullanılamıyor." };
     const mods: string[] = [];
     if (e.ctrlKey) mods.push("Ctrl");
     if (e.altKey) mods.push("Alt");
@@ -232,29 +249,25 @@
     if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
     else if (/^Digit[0-9]$/.test(code)) key = code.slice(5);
     else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
-    else if (/^Numpad[0-9]$/.test(code)) key = code;
-    else if (
-      [
-        "Space", "Enter", "Tab", "Backspace", "Insert", "Delete", "Home", "End",
-        "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-      ].includes(code)
-    ) {
-      key = code;
-    }
+    else if (/^Numpad[0-9]$/.test(code) || NAMED.has(code)) key = code;
     if (!key) return { error: "Bu tuş kullanılamıyor." };
-    if (!mods.length && !/^F\d+$/.test(key)) {
-      return {
-        error: "Harf ve rakamlarla birlikte Ctrl, Alt ya da Shift'e bas (F tuşları tek başına olur).",
-      };
-    }
     return { accel: [...mods, key].join("+") };
   }
 
+  function bare(k: string) {
+    return /^([A-Z0-9]|Space|Enter|Tab|Backspace|Arrow\w+|Backquote|Minus|Equal|CapsLock)$/.test(k);
+  }
+
+  function startRec(id: KeyAction) {
+    keyHint = "";
+    recFor = id;
+  }
+
   function onKey(e: KeyboardEvent) {
-    if (!recording) return;
+    if (!recFor) return;
     e.preventDefault();
     if (e.key === "Escape") {
-      recording = false;
+      recFor = null;
       keyHint = "";
       return;
     }
@@ -264,9 +277,10 @@
       keyHint = r.error ?? "";
       return;
     }
-    recording = false;
+    const action = recFor;
+    recFor = null;
     keyHint = "";
-    desktop.setMicKey(r.accel);
+    desktop.setKey(action, r.accel);
   }
 </script>
 
@@ -299,6 +313,10 @@
 
     {#if error}<p class="err">{error}</p>{/if}
     {#if info}<p class="ok">{info}</p>{/if}
+
+    <hr />
+
+        <PlayingSettings />
 
     <hr />
 
@@ -376,7 +394,7 @@
       {#if devices.labelsHidden}
         <button onclick={() => devices.askPermission()}>Cihaz adlarını göster (mikrofon izni ister)</button>
       {/if}
-            <div class="field">
+      <div class="field">
         <small>Mikrofon</small>
         <Select value={prefs.micId} options={micOpts} block onchange={(v) => changeMic(v)} />
       </div>
@@ -391,22 +409,6 @@
           />
         </div>
       {/if}
-      {#if canSink}
-        <label>
-          Kulaklık / hoparlör
-          <select
-            value={prefs.speakerId}
-            onchange={(e) => voice.setSpeakerDevice(e.currentTarget.value)}
-          >
-            <option value="">Varsayılan</option>
-            {#each devices.speakers as d (d.deviceId)}
-              {#if d.deviceId !== "default" && d.deviceId !== "communications"}
-                <option value={d.deviceId}>{d.label || "Hoparlör"}</option>
-              {/if}
-            {/each}
-          </select>
-        </label>
-      {/if}
       <div class="meter" title="Mikrofon seviyesi"><i style="width:{level}%"></i></div>
       <div class="row2">
         <button onclick={() => (testing ? stopTest() : startTest())}>
@@ -416,7 +418,12 @@
       </div>
       {#if testError}<p class="err">{testError}</p>{/if}
       {#if devices.error}<p class="err">{devices.error}</p>{/if}
-      <small>Odadaysan değişiklik hemen uygulanır. Bir kişinin sesini kısmak için odada avatarına tıkla.</small>
+      <Toggle
+        checked={prefs.startMuted}
+        onchange={(v) => prefs.setStartMuted(v)}
+        label="Sese girince mikrofon kapalı başlasın"
+      />
+      <small>Odadaysan cihaz değişikliği hemen uygulanır. Bir kişinin sesini kısmak için odada avatarına tıkla.</small>
     </section>
 
     {#if desktop.available}
@@ -440,36 +447,33 @@
         />
         <small>Tamamen kapatmak için saatin yanındaki Kapı simgesine sağ tıkla → Çıkış.</small>
 
-        <h3>Mikrofon kısayolu</h3>
-        <div class="row2">
-          {#if recording}
-            <span class="rec">Tuşlara bas… (Esc: vazgeç)</span>
-          {:else}
-            <code>{prefs.micKey || "Yok"}</code>
-            <button type="button" onclick={() => { keyHint = ""; recording = true; }}>Değiştir</button>
-            {#if prefs.micKey}
-              <button type="button" onclick={() => desktop.setMicKey("")}>Kaldır</button>
-            {/if}
+        <h3>Kısayollar</h3>
+        <small>Uygulama arka plandayken ya da oyundayken de çalışır. Her işlev için ayrı tuş seçebilirsin.</small>
+        {#each KEYROWS as row (row.id)}
+          <div class="krow">
+            <div class="kinfo">
+              <b>{row.name}</b>
+              <small>{row.desc}</small>
+            </div>
+            <div class="kact">
+              {#if recFor === row.id}
+                <span class="rec">Tuşa bas… (Esc: vazgeç)</span>
+              {:else}
+                <code>{prefs.keyOf(row.id) || "Yok"}</code>
+                <button type="button" onclick={() => startRec(row.id)}>Değiştir</button>
+                {#if prefs.keyOf(row.id)}
+                  <button type="button" onclick={() => desktop.setKey(row.id, "")}>Kaldır</button>
+                {/if}
+              {/if}
+            </div>
+          </div>
+          {#if bare(prefs.keyOf(row.id))}
+            <small class="warn">
+              ⚠ "{prefs.keyOf(row.id)}" tek başına bir tuş. O tuş her uygulamada bu işleve ayrılır,
+              yazı yazarken çalışmaz. F tuşları, Insert, Home ya da numpad tuşları daha uygundur.
+            </small>
           {/if}
-        </div>
-        <div class="seg2">
-          <button
-            type="button"
-            class:on={prefs.micMode === "toggle"}
-            onclick={() => desktop.setMicMode("toggle")}
-          >Aç / kapat</button>
-          <button
-            type="button"
-            class:on={prefs.micMode === "hold"}
-            onclick={() => desktop.setMicMode("hold")}
-          >Bas-konuş</button>
-        </div>
-        <small>
-          {prefs.micMode === "hold"
-            ? "Tuşu basılı tuttuğun sürece mikrofon açık olur. Sese girdiğinde mikrofon kapalı başlar."
-            : "Tuşa her basışında mikrofon açılır ya da kapanır (kısa bip duyarsın)."}
-          Kısayol uygulama arka plandayken ya da oyundayken de çalışır.
-        </small>
+        {/each}
         {#if keyHint}<p class="err">{keyHint}</p>{/if}
         {#if desktop.shortcutError}<p class="err">{desktop.shortcutError}</p>{/if}
       </section>
@@ -484,16 +488,25 @@
         onchange={(v) => prefs.setNotify(v)}
         label="Yeni mesajlarda bildirim ve ses"
       />
-      <small>Oda bazında ayar için lobideki oda kartlarında 🔔 düğmesini kullan.</small>
+      <small>Oda bazında ayar için lobideki oda kartlarında 🔔 düğmesini kullan. Bildirime tıklayınca Kapı açılır.</small>
     </section>
 
     <hr />
 
     <form onsubmit={changePassword}>
       <h2>Şifreyi değiştir</h2>
-      <label>Eski şifre <input type="password" bind:value={oldPw} autocomplete="current-password" /></label>
-      <label>Yeni şifre <input type="password" bind:value={newPw} autocomplete="new-password" /></label>
-      <label>Yeni şifre (tekrar) <input type="password" bind:value={newPw2} autocomplete="new-password" /></label>
+      <div class="field">
+        <small>Eski şifre</small>
+        <PasswordInput bind:value={oldPw} autocomplete="current-password" />
+      </div>
+      <div class="field">
+        <small>Yeni şifre</small>
+        <PasswordInput bind:value={newPw} autocomplete="new-password" />
+      </div>
+      <div class="field">
+        <small>Yeni şifre (tekrar)</small>
+        <PasswordInput bind:value={newPw2} autocomplete="new-password" />
+      </div>
       <button class="primary" disabled={pwBusy}>Şifreyi değiştir</button>
       {#if pwError}<p class="err">{pwError}</p>{/if}
       {#if pwInfo}<p class="ok">{pwInfo}</p>{/if}
@@ -509,8 +522,8 @@
 </main>
 
 <style>
-  .wrap { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
-  .box { width: 100%; max-width: 480px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
+  .wrap { min-height: 100%; display: grid; place-items: center; padding: 20px; }
+  .box { width: 100%; max-width: 500px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
   .back { align-self: flex-start; }
   h1 { margin: 0; font-size: 1.8rem; }
   h2 { margin: 0; font-size: 1.1rem; }
@@ -520,9 +533,11 @@
   .photo-actions { display: flex; flex-direction: column; gap: 8px; }
   form, .sect { display: flex; flex-direction: column; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
   small { color: var(--muted); }
   .err { margin: 0; color: #d1495b; }
   .ok { margin: 0; color: #3d9a73; }
+  .warn { color: #c98a1b; }
   code { background: var(--soft); padding: 2px 10px; border-radius: 8px; font-weight: 700; }
   .row2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .rec { color: var(--accent); font-weight: 600; }
@@ -539,10 +554,10 @@
   .bgrow { display: flex; gap: 8px; flex-wrap: wrap; }
   .rng input { padding: 0; border: 0; accent-color: var(--accent); }
 
-  .field { display: flex; flex-direction: column; gap: 4px; }
   .meter { height: 10px; border-radius: 999px; background: var(--soft); overflow: hidden; }
   .meter i { display: block; height: 100%; background: var(--accent); transition: width 0.06s; }
-  .seg2 { display: flex; gap: 6px; }
-  .seg2 button { flex: 1; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
-  .seg2 button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+  .krow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .kinfo { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .kact { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 </style>

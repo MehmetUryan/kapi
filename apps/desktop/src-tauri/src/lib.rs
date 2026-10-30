@@ -21,6 +21,46 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+#[tauri::command]
+fn show_main_window(app: AppHandle) {
+    show_main(&app);
+}
+
+#[cfg(windows)]
+fn list_processes() -> Vec<String> {
+    use std::collections::BTreeSet;
+    use std::os::windows::process::CommandExt;
+
+    let out = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .creation_flags(0x0800_0000)
+        .output();
+    let mut set = BTreeSet::new();
+    if let Ok(o) = out {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix('"') {
+                if let Some(end) = rest.find('"') {
+                    set.insert(rest[..end].to_lowercase());
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+#[cfg(not(windows))]
+fn list_processes() -> Vec<String> {
+    Vec::new()
+}
+
+#[tauri::command]
+async fn running_processes() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(list_processes)
+        .await
+        .unwrap_or_default()
+}   
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -36,7 +76,11 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![set_close_to_tray])
+        .invoke_handler(tauri::generate_handler![
+        set_close_to_tray,
+        show_main_window,
+        running_processes
+        ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" && CLOSE_TO_TRAY.load(Ordering::Relaxed) {

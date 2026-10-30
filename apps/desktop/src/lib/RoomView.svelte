@@ -24,6 +24,7 @@
   ];
   const QUICK = ["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
   const QUALITIES: { id: ShareQuality; name: string; desc: string }[] = [
+    { id: "tiny", name: "Çok hafif", desc: "480p · 30 fps · ~0,5 GB/sa" },
     { id: "light", name: "Hafif", desc: "720p · 30 fps · ~1,1 GB/sa" },
     { id: "balanced", name: "Dengeli", desc: "1080p · 30 fps · ~1,8 GB/sa" },
     { id: "high", name: "Yüksek", desc: "1080p · 60 fps · ~2,7 GB/sa" },
@@ -31,7 +32,8 @@
 
   let text = $state("");
   let list = $state<HTMLDivElement>();
-  let inputEl = $state<HTMLInputElement>();
+  let inner = $state<HTMLDivElement>();
+  let inputEl = $state<HTMLTextAreaElement>();
   let emojiOpen = $state(false);
   let rxFor = $state<string | null>(null);
   let volFor = $state<string | null>(null);
@@ -49,6 +51,7 @@
   let results = $state<Msg[] | null>(null);
   let searchBusy = $state(false);
   let searchError = $state("");
+  let stick = true;
 
   const staff = $derived(user.role === "owner" || user.role === "admin");
 
@@ -77,26 +80,45 @@
 
   $effect(() => {
     const id = room.id;
-    untrack(() => live.enter(id));
+    untrack(() => {
+      stick = true;
+      live.enter(id);
+    });
     return () => {
       live.leave();
     };
   });
 
-  // yeni mesaj gelince en alta in (eski mesaj yükleyince atlama)
-  let lastSeen = "";
+  // içerik büyüyünce (mesaj, tepki, düzenleme) alttaysan altta kal
   $effect(() => {
-    const s = searching;
-    const last = live.messages.at(-1)?.id ?? "";
-    if (s) return;
-    if (last !== lastSeen) {
-      lastSeen = last;
-      tick().then(() => list?.scrollTo({ top: list.scrollHeight }));
-    }
+    const sc = list;
+    const el = inner;
+    if (!sc || !el) return;
+    const ro = new ResizeObserver(() => {
+      if (stick) sc.scrollTop = sc.scrollHeight;
+    });
+    ro.observe(el);
+    ro.observe(sc);
+    return () => ro.disconnect();
   });
 
+  function onScroll() {
+    if (!list) return;
+    stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  }
+
+  // yazı kutusu içeriğe göre büyüsün
+  function autosize() {
+    const el = inputEl;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }
+
   $effect(() => {
-    if (!searching) tick().then(() => list?.scrollTo({ top: list.scrollHeight }));
+    void text;
+    void inputEl;
+    tick().then(autosize);
   });
 
   function attach(node: HTMLVideoElement, track: Track | null) {
@@ -108,9 +130,9 @@
     };
   }
 
-  function send(e: SubmitEvent) {
-    e.preventDefault();
+  function submit() {
     if (!text.trim()) return;
+    stick = true;
     live.say(text, replyTo?.id ?? null);
     text = "";
     replyTo = null;
@@ -119,7 +141,7 @@
   }
 
   function onInput(e: Event) {
-    const el = e.currentTarget as HTMLInputElement;
+    const el = e.currentTarget as HTMLTextAreaElement;
     if (el.value.trim()) live.sendTyping();
     const pos = el.selectionStart ?? el.value.length;
     const m = /(?:^|\s)@(\w{0,20})$/.exec(el.value.slice(0, pos));
@@ -158,8 +180,15 @@
       } else if (e.key === "Escape") {
         sugQuery = null;
       }
-    } else if (e.key === "Escape" && replyTo) {
+      return;
+    }
+    if (e.key === "Escape" && replyTo) {
       replyTo = null;
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      submit();
     }
   }
 
@@ -234,6 +263,7 @@
   async function older() {
     const el = list;
     const prev = el?.scrollHeight ?? 0;
+    stick = false;
     await live.loadOlder();
     await tick();
     if (el) el.scrollTop = el.scrollHeight - prev;
@@ -262,6 +292,7 @@
     results = null;
     query = "";
     searchError = "";
+    stick = true;
   }
 
   const fold = (s: string) =>
@@ -300,7 +331,7 @@
 <div class="page">
   <header>
     <button onclick={onback}>← Odalar</button>
-    <h1>{room.name}</h1>
+    <h1>{room.kind === "dm" ? "@" : ""}{room.name}</h1>
     <Toggle
       checked={!prefs.isMuted(room.id)}
       onchange={() => prefs.toggleMute(room.id)}
@@ -416,6 +447,10 @@
             <span>{voice.micOn ? "🎙" : "🔇"}</span>
             {voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}
           </button>
+          <button class="dbtn" class:muted={voice.deafened} onclick={() => voice.toggleDeafen()}>
+            <span>{voice.deafened ? "🔕" : "🎧"}</span>
+            {voice.deafened ? "Duymuyorsun" : "Duyuyorsun"}
+          </button>
           <span class="sep"></span>
           <div class="split">
             <button
@@ -464,10 +499,10 @@
       {/if}
 
       <div class="vmeta">
-        {#if inThisVoice && isTauri() && prefs.micKey}
-          <small>
-            {prefs.micMode === "hold" ? "Bas-konuş" : "Mikrofon kısayolu"}: <code>{prefs.micKey}</code>
-          </small>
+        {#if inThisVoice && isTauri()}
+          {#if prefs.keyToggle}<small>Aç/kapat: <code>{prefs.keyToggle}</code></small>{/if}
+          {#if prefs.keyPtt}<small>Bas-konuş: <code>{prefs.keyPtt}</code></small>{/if}
+          {#if prefs.keyDeafen}<small>Duymayı kapat: <code>{prefs.keyDeafen}</code></small>{/if}
         {/if}
         {#if inThisVoice && (voice.quality === "poor" || voice.quality === "lost")}
           <small class="err">⚠ Bağlantın zayıf</small>
@@ -522,82 +557,84 @@
         </div>
       </div>
     {:else}
-      <div class="list" bind:this={list}>
-        {#if live.hasMore}
-          <button class="older" onclick={older} disabled={live.loadingOlder}>
-            {live.loadingOlder ? "Yükleniyor…" : "Eski mesajları yükle"}
-          </button>
-        {/if}
-        {#each live.messages as m (m.id)}
-          {@const mine = m.userId === user.id}
-          <div class="msg" class:mine class:has-rx={!!m.reactions?.length}>
-            {#if !mine}<Avatar name={m.username} id={m.userId} v={m.avatarAt} size={28} />{/if}
-            <div class="bubble" class:mentioned={!mine && mentionRe.test(m.text)}>
-              {#if !mine}<b>{m.username}</b>{/if}
-              {#if m.replyTo}
-                <div class="quote">
-                  {#if m.reply}<b>{m.reply.username}</b><span>{m.reply.text}</span>{:else}<i>Silinmiş mesaj</i>{/if}
-                </div>
-              {/if}
-              {#if editingId === m.id}
-                <form class="edit" onsubmit={(e) => saveEdit(e, m)}>
-                  <input
-                    bind:value={editText}
-                    maxlength="2000"
-                    onkeydown={(e) => e.key === "Escape" && cancelEdit()}
-                  />
-                  <div class="edit-actions">
-                    <button>Kaydet</button>
-                    <button type="button" onclick={cancelEdit}>Vazgeç</button>
+      <div class="list" bind:this={list} onscroll={onScroll}>
+        <div class="inner" bind:this={inner}>
+          {#if live.hasMore}
+            <button class="older" onclick={older} disabled={live.loadingOlder}>
+              {live.loadingOlder ? "Yükleniyor…" : "Eski mesajları yükle"}
+            </button>
+          {/if}
+          {#each live.messages as m (m.id)}
+            {@const mine = m.userId === user.id}
+            <div class="msg" class:mine class:has-rx={!!m.reactions?.length}>
+              {#if !mine}<Avatar name={m.username} id={m.userId} v={m.avatarAt} size={28} />{/if}
+              <div class="bubble" class:mentioned={!mine && mentionRe.test(m.text)}>
+                {#if !mine}<b>{m.username}</b>{/if}
+                {#if m.replyTo}
+                  <div class="quote">
+                    {#if m.reply}<b>{m.reply.username}</b><span>{m.reply.text}</span>{:else}<i>Silinmiş mesaj</i>{/if}
                   </div>
-                </form>
-              {:else}
-                <span class="txt"><RichText text={m.text} {names} me={user.username} /></span>
-              {/if}
-              <small>{time(m.createdAt)}{m.editedAt ? " · düzenlendi" : ""}</small>
-              {#if m.reactions?.length}
-                <div class="rx">
-                  {#each m.reactions as r (r.emoji)}
+                {/if}
+                {#if editingId === m.id}
+                  <form class="edit" onsubmit={(e) => saveEdit(e, m)}>
+                    <input
+                      bind:value={editText}
+                      maxlength="2000"
+                      onkeydown={(e) => e.key === "Escape" && cancelEdit()}
+                    />
+                    <div class="edit-actions">
+                      <button>Kaydet</button>
+                      <button type="button" onclick={cancelEdit}>Vazgeç</button>
+                    </div>
+                  </form>
+                {:else}
+                  <span class="txt"><RichText text={m.text} {names} me={user.username} /></span>
+                {/if}
+                <small>{time(m.createdAt)}{m.editedAt ? " · düzenlendi" : ""}</small>
+                {#if m.reactions?.length}
+                  <div class="rx">
+                    {#each m.reactions as r (r.emoji)}
+                      <button
+                        type="button"
+                        class="chip"
+                        class:me={r.users.includes(user.id)}
+                        onclick={() => react(m, r.emoji)}
+                      >{r.emoji}{r.users.length > 1 ? ` ${r.users.length}` : ""}</button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              {#if editingId !== m.id}
+                <div class="tools" class:open={rxFor === m.id}>
+                  {#if rxFor === m.id}
+                    {#each QUICK as q}
+                      <button type="button" class="q" onclick={() => react(m, q)}>{q}</button>
+                    {/each}
+                  {:else}
+                    <button title="Tepki ver" onclick={() => (rxFor = m.id)}>☺</button>
                     <button
-                      type="button"
-                      class="chip"
-                      class:me={r.users.includes(user.id)}
-                      onclick={() => react(m, r.emoji)}
-                    >{r.emoji}{r.users.length > 1 ? ` ${r.users.length}` : ""}</button>
-                  {/each}
+                      title="Yanıtla"
+                      onclick={() => {
+                        replyTo = m;
+                        inputEl?.focus();
+                      }}
+                    >↩</button>
+                    {#if mine}<button title="Düzenle" onclick={() => startEdit(m)}>✎</button>{/if}
+                    {#if mine || staff}
+                      <button title="Sil" onclick={() => removeMsg(m)}>
+                        {delId === m.id ? "Silinsin mi?" : "✕"}
+                      </button>
+                    {/if}
+                  {/if}
                 </div>
               {/if}
             </div>
-            {#if editingId !== m.id}
-              <div class="tools" class:open={rxFor === m.id}>
-                {#if rxFor === m.id}
-                  {#each QUICK as q}
-                    <button type="button" class="q" onclick={() => react(m, q)}>{q}</button>
-                  {/each}
-                {:else}
-                  <button title="Tepki ver" onclick={() => (rxFor = m.id)}>☺</button>
-                  <button
-                    title="Yanıtla"
-                    onclick={() => {
-                      replyTo = m;
-                      inputEl?.focus();
-                    }}
-                  >↩</button>
-                  {#if mine}<button title="Düzenle" onclick={() => startEdit(m)}>✎</button>{/if}
-                  {#if mine || staff}
-                    <button title="Sil" onclick={() => removeMsg(m)}>
-                      {delId === m.id ? "Silinsin mi?" : "✕"}
-                    </button>
-                  {/if}
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/each}
+          {/each}
+        </div>
       </div>
     {/if}
 
-    {#if typingText && !searching}<small class="typing">{typingText}</small>{/if}
+    {#if !searching}<small class="typing">{typingText || "\u00a0"}</small>{/if}
     {#if msgError}<small class="err">{msgError}</small>{/if}
     {#if replyTo}
       <div class="replybar">
@@ -606,7 +643,13 @@
       </div>
     {/if}
 
-    <form onsubmit={send}>
+    <form
+      class="composer"
+      onsubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
       <div class="emoji-wrap">
         <button type="button" class="emoji-btn" title="Emoji" onclick={() => (emojiOpen = !emojiOpen)}>😊</button>
         {#if emojiOpen}
@@ -618,15 +661,15 @@
         {/if}
       </div>
       <div class="inputwrap">
-        <input
+        <textarea
           bind:this={inputEl}
           bind:value={text}
+          rows="1"
           oninput={onInput}
           onkeydown={onComposerKey}
-          placeholder="Bir şey yaz…  (@ ile birini an, **kalın**, `kod`)"
+          placeholder="Bir şey yaz…  (Enter: gönder · Shift+Enter: yeni satır · @ ile an)"
           maxlength="2000"
-          autocomplete="off"
-        />
+        ></textarea>
         {#if suggestions.length}
           <ul class="sug card">
             {#each suggestions as s, i (s.id)}
@@ -647,20 +690,22 @@
           </ul>
         {/if}
       </div>
-      <button class="primary">Gönder</button>
+      <button class="primary send">Gönder</button>
     </form>
   </section>
 </div>
 
 <style>
-  .page { height: 100vh; display: flex; flex-direction: column; gap: 14px; padding: 18px; }
-  header { display: flex; align-items: center; gap: 14px; }
-  h1 { margin: 0; font-size: 1.4rem; flex: 1; }
+  .page { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+  header { display: flex; align-items: center; gap: 14px; flex: none; }
+  h1 { margin: 0; font-size: 1.4rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count, .muted { color: var(--muted); }
 
   .stage {
     flex: 1;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -670,7 +715,7 @@
   }
   .shares {
     flex: 1;
-    min-height: 0;
+    min-height: 180px;
     width: 100%;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -754,20 +799,32 @@
   .err { color: #d1495b; font-size: 0.85rem; }
   .vmeta .err { color: #d1495b; }
 
-  .chat { height: 42%; min-height: 250px; display: flex; flex-direction: column; padding: 12px; gap: 8px; }
-  .who { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); flex-wrap: wrap; }
+  .chat { flex: none; height: 44%; min-height: 260px; display: flex; flex-direction: column; padding: 12px; gap: 6px; overflow: hidden; }
+  .who { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); flex-wrap: wrap; flex: none; }
   .mini { display: inline-flex; }
   .searchbtn { margin-left: auto; padding: 0.2rem 0.6rem; background: transparent; }
-  .list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-bottom: 6px; }
+  .list { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; scrollbar-gutter: stable; }
+  .inner { display: flex; flex-direction: column; gap: 8px; padding-bottom: 16px; min-width: 0; }
   .older { align-self: center; padding: 0.3rem 1rem; font-size: 0.8rem; }
-  .msg { display: flex; gap: 8px; align-items: flex-end; }
-  .msg.has-rx { margin-bottom: 14px; }
+  .msg { display: flex; gap: 8px; align-items: flex-end; min-width: 0; }
+  .msg.has-rx { margin-bottom: 12px; }
   .msg.mine { justify-content: flex-end; }
-  .bubble { position: relative; background: var(--soft); padding: 8px 12px; border-radius: 16px; max-width: 70%; display: flex; flex-direction: column; }
+  .bubble {
+    position: relative;
+    min-width: 0;
+    width: fit-content;
+    max-width: min(72%, 640px);
+    background: var(--soft);
+    padding: 8px 12px;
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    overflow-wrap: anywhere;
+  }
   .bubble.mentioned { box-shadow: 0 0 0 2px var(--accent); }
   .mine .bubble { background: var(--accent); color: var(--accent-ink); }
   .bubble b { font-size: 0.75rem; opacity: 0.75; }
-  .txt { white-space: pre-wrap; word-break: break-word; }
+  .txt { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
   .bubble small { font-size: 0.65rem; opacity: 0.6; align-self: flex-end; }
   .quote {
     display: flex;
@@ -799,7 +856,7 @@
   .chip.me { border-color: var(--accent); }
   .chip:hover { transform: none; }
 
-  .tools { display: flex; gap: 2px; align-self: center; opacity: 0; transition: opacity 0.12s; }
+  .tools { display: flex; gap: 2px; align-self: center; opacity: 0; transition: opacity 0.12s; flex: none; }
   .msg:hover .tools, .tools:focus-within, .tools.open { opacity: 1; }
   .tools button { padding: 0.1rem 0.45rem; font-size: 0.85rem; background: transparent; color: var(--muted); }
   .tools .q { font-size: 1.05rem; padding: 0.1rem 0.3rem; }
@@ -810,8 +867,8 @@
   .edit-actions { display: flex; gap: 6px; }
   .edit button { background: var(--surface); color: var(--ink); font-size: 0.8rem; padding: 0.25rem 0.7rem; }
 
-  .typing { color: var(--muted); font-size: 0.8rem; min-height: 16px; }
-  .replybar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; border-radius: 12px; background: var(--soft); font-size: 0.85rem; }
+  .typing { flex: none; color: var(--muted); font-size: 0.8rem; height: 16px; line-height: 16px; overflow: hidden; }
+  .replybar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; border-radius: 12px; background: var(--soft); font-size: 0.85rem; }
   .replybar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .replybar .x { padding: 0 0.5rem; background: transparent; }
 
@@ -821,11 +878,12 @@
   .res { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 12px; background: var(--soft); }
   .rtxt { display: flex; flex-direction: column; min-width: 0; }
   .rtxt small { color: var(--muted); }
-  .rtxt span { white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .rtxt span { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   mark { background: color-mix(in srgb, var(--accent) 40%, transparent); color: inherit; border-radius: 4px; padding: 0 2px; }
 
-  form { display: flex; gap: 8px; }
-  .inputwrap { position: relative; flex: 1; }
+  .composer { flex: none; display: flex; gap: 8px; align-items: flex-end; }
+  .composer .send { align-self: flex-end; }
+  .inputwrap { position: relative; flex: 1; min-width: 0; }
   .sug { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30; margin: 0; padding: 6px; list-style: none; min-width: 200px; }
   .sug button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: transparent; border-radius: 10px; padding: 0.35rem 0.6rem; }
   .sug button:hover, .sug button.on { background: var(--soft); transform: none; }

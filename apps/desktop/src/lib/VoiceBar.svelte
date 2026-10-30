@@ -10,7 +10,10 @@
     <span class="dot"></span>
     <span>Seste: <b>{voice.room.name}</b></span>
     <button onclick={() => voice.toggleMic()}>
-      {voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}
+      {voice.micOn ? "🎙 Açık" : "🔇 Kapalı"}
+    </button>
+    <button onclick={() => voice.toggleDeafen()}>
+      {voice.deafened ? "🔕 Duymuyorsun" : "🎧 Duyuyorsun"}
     </button>
     <button onclick={() => voice.room && onopen(voice.room)}>Odaya dön</button>
     <button class="danger" onclick={() => voice.leave()}>Sesten çık</button>

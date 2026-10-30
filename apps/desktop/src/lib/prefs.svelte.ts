@@ -9,10 +9,17 @@ const K = {
   closeTray: "kapi.closeToTray",
   micKey: "kapi.micKey",
   micMode: "kapi.micMode",
+  keyToggle: "kapi.keyToggle",
+  keyPtt: "kapi.keyPtt",
+  keyDeafen: "kapi.keyDeafen",
+  startMuted: "kapi.startMuted",
   mic: "kapi.micId",
   speaker: "kapi.speakerId",
   shareQ: "kapi.shareQuality",
   userVol: "kapi.userVol",
+  showPlaying: "kapi.showPlaying",
+  playingText: "kapi.playingText",
+  games: "kapi.customGames",
 };
 
 export const THEMES = [
@@ -26,8 +33,8 @@ export const THEMES = [
 ] as const;
 
 export type ThemeId = (typeof THEMES)[number]["id"];
-export type ShareQuality = "light" | "balanced" | "high";
-export type MicMode = "toggle" | "hold";
+export type ShareQuality = "tiny" | "light" | "balanced" | "high";
+export type KeyAction = "toggle" | "ptt" | "deafen";
 export const ACCENTS = ["#e8805a", "#e0567f", "#7c5ce0", "#5b9cf5", "#2fb67c", "#e6a23c"];
 
 function get(key: string): string | null {
@@ -75,12 +82,21 @@ function readTheme(): ThemeId {
 
 function readQuality(): ShareQuality {
   const v = get(K.shareQ);
-  return v === "balanced" || v === "high" ? v : "light";
+  return v === "tiny" || v === "balanced" || v === "high" ? v : "light";
 }
 
 function readVol(): Record<string, number> {
   try {
     const v = JSON.parse(get(K.userVol) ?? "{}");
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+function readGames(): Record<string, string> {
+  try {
+    const v = JSON.parse(get(K.games) ?? "{}");
     return v && typeof v === "object" && !Array.isArray(v) ? v : {};
   } catch {
     return {};
@@ -97,6 +113,10 @@ function inkFor(hex: string): string {
   return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? "#1b1713" : "#ffffff";
 }
 
+// eski tek kısayol ayarını yeni üç kısayola taşı
+const oldKey = get(K.micKey);
+const oldHold = get(K.micMode) === "hold";
+
 class Prefs {
   notifyOn = $state(get(K.on) !== "off");
   muted = $state<string[]>(readMuted());
@@ -106,12 +126,17 @@ class Prefs {
   veil = $state(num(get(K.veil), 55));
   blur = $state(num(get(K.blur), 0));
   closeToTray = $state(get(K.closeTray) !== "off");
-  micKey = $state(get(K.micKey) ?? "Ctrl+Shift+M");
-  micMode = $state<MicMode>(get(K.micMode) === "hold" ? "hold" : "toggle");
+  keyToggle = $state(get(K.keyToggle) ?? (oldHold ? "" : (oldKey ?? "Ctrl+Shift+M")));
+  keyPtt = $state(get(K.keyPtt) ?? (oldHold ? (oldKey ?? "") : ""));
+  keyDeafen = $state(get(K.keyDeafen) ?? "");
+  startMuted = $state(get(K.startMuted) === "on");
   micId = $state(get(K.mic) ?? "");
   speakerId = $state(get(K.speaker) ?? "");
   shareQuality = $state<ShareQuality>(readQuality());
   userVol = $state<Record<string, number>>(readVol());
+  showPlaying = $state(get(K.showPlaying) === "on");
+  playingText = $state(get(K.playingText) ?? "");
+  customGames = $state<Record<string, string>>(readGames());
 
   constructor() {
     if (typeof document !== "undefined") this.applyTheme();
@@ -138,14 +163,26 @@ class Prefs {
     set(K.closeTray, v ? "on" : "off");
   }
 
-  setMicKey(key: string) {
-    this.micKey = key;
-    set(K.micKey, key);
+  keyOf(a: KeyAction) {
+    return a === "toggle" ? this.keyToggle : a === "ptt" ? this.keyPtt : this.keyDeafen;
   }
 
-  setMicMode(m: MicMode) {
-    this.micMode = m;
-    set(K.micMode, m);
+  setKey(a: KeyAction, key: string) {
+    if (a === "toggle") {
+      this.keyToggle = key;
+      set(K.keyToggle, key);
+    } else if (a === "ptt") {
+      this.keyPtt = key;
+      set(K.keyPtt, key);
+    } else {
+      this.keyDeafen = key;
+      set(K.keyDeafen, key);
+    }
+  }
+
+  setStartMuted(v: boolean) {
+    this.startMuted = v;
+    set(K.startMuted, v ? "on" : "off");
   }
 
   setMicId(id: string) {
@@ -169,6 +206,28 @@ class Prefs {
     else next[id] = Math.max(0, v);
     this.userVol = next;
     set(K.userVol, JSON.stringify(next));
+  }
+
+    setShowPlaying(v: boolean) {
+    this.showPlaying = v;
+    set(K.showPlaying, v ? "on" : "off");
+  }
+
+  setPlayingText(t: string) {
+    this.playingText = t;
+    set(K.playingText, t);
+  }
+
+  addCustomGame(exe: string, label: string) {
+    this.customGames = { ...this.customGames, [exe]: label };
+    set(K.games, JSON.stringify(this.customGames));
+  }
+
+  removeCustomGame(exe: string) {
+    const next = { ...this.customGames };
+    delete next[exe];
+    this.customGames = next;
+    set(K.games, JSON.stringify(next));
   }
 
   setTheme(id: ThemeId) {

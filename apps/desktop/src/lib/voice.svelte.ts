@@ -6,7 +6,6 @@ import {
   type RemoteParticipant,
 } from "livekit-client";
 import { api, type Room as AppRoom } from "./api";
-import { isTauri } from "./env";
 import { live } from "./live.svelte";
 import { prefs, type ShareQuality } from "./prefs.svelte";
 
@@ -26,6 +25,7 @@ const SHARE_PRESETS: Record<
   ShareQuality,
   { width: number; height: number; fps: number; bitrate: number }
 > = {
+  tiny: { width: 854, height: 480, fps: 30, bitrate: 1_200_000 },
   light: { width: 1280, height: 720, fps: 30, bitrate: 2_500_000 },
   balanced: { width: 1920, height: 1080, fps: 30, bitrate: 4_000_000 },
   high: { width: 1920, height: 1080, fps: 60, bitrate: 6_000_000 },
@@ -61,6 +61,8 @@ const sounds = {
   leave: () => beep([880, 660]),
   micOn: () => beep([880]),
   micOff: () => beep([520, 380]),
+  deafOn: () => beep([440, 330]),
+  deafOff: () => beep([660, 880]),
 };
 
 class Voice {
@@ -68,6 +70,7 @@ class Voice {
   busy = $state(false);
   error = $state("");
   micOn = $state(false);
+  deafened = $state(false);
   sharing = $state(false);
   shareAudio = $state(false);
   quality = $state("unknown");
@@ -82,6 +85,8 @@ class Voice {
   private audioEls = new Map<Track, HTMLMediaElement>();
   private pauseTimers = new Map<string, number>();
   private aloneTimer: number | undefined;
+  private pttPrev: boolean | null = null;
+  private micBeforeDeafen = false;
 
   async join(target: AppRoom) {
     if (this.busy) return;
@@ -146,6 +151,7 @@ class Voice {
             const el = track.attach();
             el.dataset.kapi = "1";
             el.style.display = "none";
+            el.muted = this.deafened;
             document.body.appendChild(el);
             this.audioEls.set(track, el);
             if (pub.source === Track.Source.ScreenShareAudio) this.applyVolume(p.identity);
@@ -167,9 +173,7 @@ class Voice {
       for (const p of lk.remoteParticipants.values()) this.ensureSubs(p);
       try {
         await lk.localParticipant.setMicrophoneEnabled(true);
-        if (isTauri() && prefs.micMode === "hold" && prefs.micKey) {
-          await lk.localParticipant.setMicrophoneEnabled(false);
-        }
+        if (prefs.startMuted) await lk.localParticipant.setMicrophoneEnabled(false);
       } catch {
         this.error = "Mikrofona erişilemedi. Mikrofon iznini kontrol et.";
       }
@@ -204,6 +208,24 @@ class Voice {
     return this.setMic(!this.micOn);
   }
 
+  // karşıdakileri duymayı kapat (mikrofon da kapanır, açınca eski hâline döner)
+  setDeafened(on: boolean) {
+    if (!this.lk || on === this.deafened) return;
+    this.deafened = on;
+    this.audioEls.forEach((el) => (el.muted = on));
+    if (on) {
+      this.micBeforeDeafen = this.micOn;
+      if (this.micOn) void this.setMic(false);
+    } else if (this.micBeforeDeafen) {
+      this.micBeforeDeafen = false;
+      void this.setMic(true);
+    }
+  }
+
+  toggleDeafen() {
+    this.setDeafened(!this.deafened);
+  }
+
   hotkeyToggle() {
     if (!this.lk || !this.joined) return;
     const next = !this.micOn;
@@ -212,10 +234,25 @@ class Voice {
     else sounds.micOff();
   }
 
+  // bas-konuş: basılıyken mikrofon açık, bırakınca eski durumuna döner
   hotkeyHold(down: boolean) {
     if (!this.lk || !this.joined) return;
-    if (down === this.micOn) return;
-    void this.setMic(down);
+    if (down) {
+      if (this.pttPrev !== null) return;
+      this.pttPrev = this.micOn;
+      if (!this.micOn) void this.setMic(true);
+    } else {
+      const prev = this.pttPrev;
+      this.pttPrev = null;
+      if (prev === false) void this.setMic(false);
+    }
+  }
+
+  hotkeyDeafen() {
+    if (!this.lk || !this.joined) return;
+    this.toggleDeafen();
+    if (this.deafened) sounds.deafOn();
+    else sounds.deafOff();
   }
 
   async setMicDevice(id: string) {
@@ -401,6 +438,9 @@ class Voice {
     this.room = null;
     this.joined = false;
     this.micOn = false;
+    this.deafened = false;
+    this.pttPrev = null;
+    this.micBeforeDeafen = false;
     this.sharing = false;
     this.quality = "unknown";
     this.people = {};

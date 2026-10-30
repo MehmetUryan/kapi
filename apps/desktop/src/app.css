@@ -88,7 +88,14 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
+.scrollpage {
+  height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 body {
   background: var(--bg);
   color: var(--ink);
@@ -140,3 +147,16 @@ html[data-bg="on"] .card {
   background: color-mix(in srgb, var(--surface) 84%, transparent);
   backdrop-filter: blur(10px);
 }
+textarea {
+  width: 100%;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 14px;
+  padding: 0.65rem 0.9rem;
+  outline: none;
+  font: inherit;
+  line-height: 1.35;
+  resize: none;
+}
+textarea:focus { border-color: var(--accent); }
