@@ -33,6 +33,9 @@ export type Msg = {
   createdAt: number;
   editedAt?: number | null;
   reactions?: { emoji: string; users: string[] }[];
+  replyTo?: string | null;
+  reply?: { id: string; username: string; text: string } | null;
+  mentions?: string[];
 };
 
 const K = { server: "kapi.server", token: "kapi.token", migrated: "kapi.serverMigrated" };
@@ -80,3 +83,4 @@ export async function api<T>(
   if (!res.ok) throw new Error((data as { error?: string }).error ?? "İstek başarısız");
   return data as T;
 }
+export type Member = { id: string; username: string; avatarAt: number | null };

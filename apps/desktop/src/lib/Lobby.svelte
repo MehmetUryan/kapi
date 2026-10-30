@@ -157,7 +157,7 @@
           </form>
         {:else}
           <button class="room card" onclick={() => pick(r)}>
-              <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id)}>{live.unread[r.id]}</span>{/if}</h2>
+                         <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
             <div class="faces">
               {#each people.slice(0, 5) as p (p.id)}
                 <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />

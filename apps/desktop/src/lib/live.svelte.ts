@@ -1,4 +1,4 @@
-import { api, wsUrl, type Msg, type User } from "./api";
+import { api, wsUrl, type Member, type Msg, type User } from "./api";
 import { notify } from "./notify";
 import { prefs } from "./prefs.svelte";
 
@@ -6,7 +6,12 @@ class Live {
   presence = $state<Record<string, User[]>>({});
   voice = $state<Record<string, User[]>>({});
   messages = $state<Msg[]>([]);
+  members = $state<Member[]>([]);
+  typers = $state<{ id: string; name: string; until: number }[]>([]);
   unread = $state<Record<string, number>>({});
+  mentionUnread = $state<Record<string, number>>({});
+  hasMore = $state(false);
+  loadingOlder = $state(false);
   roomsVersion = $state(0);
   meVersion = $state(0);
   authLost = $state(false);
@@ -19,6 +24,7 @@ class Live {
   private ws: WebSocket | null = null;
   private retry: number | undefined;
   private stopped = true;
+  private lastTyping = 0;
 
   connect(me: string) {
     this.me = me;
@@ -36,7 +42,10 @@ class Live {
     this.presence = {};
     this.voice = {};
     this.messages = [];
+    this.typers = [];
     this.unread = {};
+    this.mentionUnread = {};
+    this.hasMore = false;
     this.currentRoom = null;
     this.voiceRoom = null;
   }
@@ -60,13 +69,16 @@ class Live {
       else if (data.type === "me") this.meVersion++;
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
-        this.messages = [...this.messages, data.message];
+        const m: Msg = data.message;
+        this.messages = [...this.messages, m];
+        this.typers = this.typers.filter((t) => t.id !== m.userId);
+        const mentioned = !!m.mentions?.includes(this.me);
         if (
           !document.hasFocus() &&
-          data.message.userId !== this.me &&
-          !prefs.isMuted(data.message.roomId)
+          m.userId !== this.me &&
+          (mentioned || !prefs.isMuted(m.roomId))
         ) {
-          notify(data.message.username, data.message.text);
+          notify(mentioned ? `${m.username} seni andı` : m.username, m.text);
         }
       } else if (data.type === "message-edited" && data.roomId === this.currentRoom) {
         this.messages = this.messages.map((m) =>
@@ -78,9 +90,17 @@ class Live {
         this.messages = this.messages.map((m) =>
           m.id === data.id ? { ...m, reactions: data.reactions } : m,
         );
+      } else if (data.type === "typing" && data.roomId === this.currentRoom) {
+        this.addTyper(data.userId, data.username);
       } else if (data.type === "activity") {
         this.unread = { ...this.unread, [data.roomId]: (this.unread[data.roomId] ?? 0) + 1 };
-        if (!prefs.isMuted(data.roomId)) {
+        if (data.mention) {
+          this.mentionUnread = {
+            ...this.mentionUnread,
+            [data.roomId]: (this.mentionUnread[data.roomId] ?? 0) + 1,
+          };
+          notify(`${data.username} seni andı · ${data.roomName}`, data.text);
+        } else if (!prefs.isMuted(data.roomId)) {
           notify(`${data.username} · ${data.roomName}`, data.text);
         }
       }
@@ -102,21 +122,70 @@ class Live {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(data));
   }
 
+  private addTyper(id: string, name: string) {
+    const until = Date.now() + 4500;
+    this.typers = [...this.typers.filter((t) => t.id !== id), { id, name, until }];
+    window.setTimeout(() => {
+      const t = Date.now();
+      this.typers = this.typers.filter((x) => x.until > t);
+    }, 4600);
+  }
+
+  async loadMembers() {
+    try {
+      this.members = await api<Member[]>("/api/members");
+    } catch {
+      // üye listesi alınamadı: @ önerileri çalışmaz
+    }
+  }
+
   async enter(roomId: string) {
     this.currentRoom = roomId;
     if (this.unread[roomId]) this.unread = { ...this.unread, [roomId]: 0 };
+    if (this.mentionUnread[roomId]) this.mentionUnread = { ...this.mentionUnread, [roomId]: 0 };
     this.messages = [];
+    this.typers = [];
+    this.hasMore = false;
     this.sendJson({ type: "join", roomId });
+    void this.loadMembers();
     const history = await api<Msg[]>(`/api/rooms/${roomId}/messages`);
     if (this.currentRoom === roomId) {
       const ids = new Set(history.map((m) => m.id));
       this.messages = [...history, ...this.messages.filter((m) => !ids.has(m.id))];
+      this.hasMore = history.length >= 50;
     }
+  }
+
+  async loadOlder() {
+    const room = this.currentRoom;
+    const first = this.messages[0];
+    if (!room || !first || this.loadingOlder || !this.hasMore) return;
+    this.loadingOlder = true;
+    try {
+      const older = await api<Msg[]>(
+        `/api/rooms/${room}/messages?before=${first.createdAt}&limit=50`,
+      );
+      if (this.currentRoom === room) {
+        const have = new Set(this.messages.map((m) => m.id));
+        this.messages = [...older.filter((m) => !have.has(m.id)), ...this.messages];
+        this.hasMore = older.length >= 50;
+      }
+    } catch {
+      // yüklenemedi
+    } finally {
+      this.loadingOlder = false;
+    }
+  }
+
+  search(q: string) {
+    if (!this.currentRoom) return Promise.resolve([] as Msg[]);
+    return api<Msg[]>(`/api/rooms/${this.currentRoom}/search?q=${encodeURIComponent(q)}`);
   }
 
   leave() {
     this.currentRoom = null;
     this.messages = [];
+    this.typers = [];
     this.sendJson({ type: "leave" });
   }
 
@@ -125,8 +194,15 @@ class Live {
     this.sendJson({ type: "voice", roomId });
   }
 
-  say(text: string) {
-    this.sendJson({ type: "say", text });
+  say(text: string, replyTo: string | null = null) {
+    this.sendJson({ type: "say", text, replyTo });
+  }
+
+  sendTyping() {
+    const t = Date.now();
+    if (t - this.lastTyping < 2500) return;
+    this.lastTyping = t;
+    this.sendJson({ type: "typing" });
   }
 }
 

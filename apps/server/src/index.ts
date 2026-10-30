@@ -255,6 +255,76 @@ function broadcastPresence() {
   for (const c of clients) c.send(msg);
 }
 
+// ---------- mesaj yardımcıları ----------
+function sendToRoom(roomId: string, data: unknown) {
+  for (const c of clients) if (c.roomId === roomId) c.send(data);
+}
+
+function sendToRoomExcept(roomId: string, except: Client, data: unknown) {
+  for (const c of clients) if (c.roomId === roomId && c !== except) c.send(data);
+}
+
+function groupReactions(rows: { emoji: string; userId: string }[]) {
+  const map = new Map<string, string[]>();
+  for (const r of rows) {
+    const list = map.get(r.emoji) ?? [];
+    list.push(r.userId);
+    map.set(r.emoji, list);
+  }
+  return [...map.entries()].map(([emoji, ids]) => ({ emoji, users: ids }));
+}
+
+const MENTION_RE = /(?:^|[^\w])@(\w{3,20})/g;
+
+function resolveMentions(text: string): string[] {
+  if (!text.includes("@")) return [];
+  const names = new Set<string>();
+  for (const m of text.matchAll(MENTION_RE)) names.add(m[1]);
+  if (!names.size) return [];
+  return db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(inArray(users.username, [...names]), eq(users.banned, 0)))
+    .all()
+    .map((r) => r.id);
+}
+
+type ReplyPreview = { id: string; username: string; text: string };
+
+function replyPreviews(ids: string[]): Map<string, ReplyPreview> {
+  const map = new Map<string, ReplyPreview>();
+  if (!ids.length) return map;
+  const rows = db
+    .select({ id: messages.id, text: messages.text, username: users.username })
+    .from(messages)
+    .innerJoin(users, eq(messages.userId, users.id))
+    .where(inArray(messages.id, ids))
+    .all();
+  for (const r of rows) map.set(r.id, { id: r.id, username: r.username, text: r.text.slice(0, 140) });
+  return map;
+}
+
+function decorate<T extends { id: string; text: string; replyTo: string | null }>(rows: T[]) {
+  const parents = [...new Set(rows.map((r) => r.replyTo).filter((x): x is string => !!x))];
+  const previews = replyPreviews(parents);
+  const rx = rows.length
+    ? db
+        .select()
+        .from(reactions)
+        .where(inArray(reactions.messageId, rows.map((r) => r.id)))
+        .all()
+    : [];
+  return rows.map((r) => ({
+    ...r,
+    reply: r.replyTo ? (previews.get(r.replyTo) ?? null) : null,
+    reactions: groupReactions(rx.filter((x) => x.messageId === r.id)),
+  }));
+}
+
+// Türkçe harflere duyarsız arama için
+const fold = (s: string) =>
+  s.toLocaleLowerCase("tr-TR").replace(/ı/g, "i").normalize("NFD").replace(/\p{M}/gu, "");
+
 // ---------- şemalar ----------
 const usernameRule = z.string().trim().min(3).max(20).regex(/^\w+$/);
 
@@ -276,6 +346,11 @@ const editBody = z.object({ text: z.string().trim().min(1).max(2000) });
 const reactBody = z.object({
   emoji: z.string().min(1).max(16).regex(/\p{Extended_Pictographic}/u),
 });
+const historyQuery = z.object({
+  before: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+});
+const searchQuery = z.object({ q: z.string().trim().min(2).max(60) });
 const roleBody = z.object({ role: z.enum(["admin", "member"]) });
 const banBody = z.object({ banned: z.boolean() });
 const passwordBody = z.object({
@@ -300,7 +375,12 @@ const clientMsg = z.discriminatedUnion("type", [
   z.object({ type: z.literal("join"), roomId: z.string() }),
   z.object({ type: z.literal("leave") }),
   z.object({ type: z.literal("voice"), roomId: z.string().nullable() }),
-  z.object({ type: z.literal("say"), text: z.string().trim().min(1).max(2000) }),
+  z.object({ type: z.literal("typing") }),
+  z.object({
+    type: z.literal("say"),
+    text: z.string().trim().min(1).max(2000),
+    replyTo: z.string().nullable().optional(),
+  }),
 ]);
 
 app.setErrorHandler((err, _req, reply) => {
@@ -485,6 +565,18 @@ app.get("/api/users/:id/avatar", async (req, reply) => {
     .header("Content-Type", "image/jpeg")
     .header("Cache-Control", "public, max-age=31536000, immutable")
     .send(Buffer.from(b64, "base64"));
+});
+
+// herkesin görebileceği kısa üye listesi (@bahsetme için)
+app.get("/api/members", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  return db
+    .select({ id: users.id, username: users.username, avatarAt: users.avatarAt })
+    .from(users)
+    .where(eq(users.banned, 0))
+    .orderBy(users.username)
+    .all();
 });
 
 // ---------- yönetim ----------
@@ -675,53 +767,61 @@ app.post("/api/rooms/:id/unlock", async (req, reply) => {
   return { ok: true };
 });
 
+const messageCols = {
+  id: messages.id,
+  roomId: messages.roomId,
+  userId: messages.userId,
+  username: users.username,
+  avatarAt: users.avatarAt,
+  text: messages.text,
+  createdAt: messages.createdAt,
+  editedAt: messages.editedAt,
+  replyTo: messages.replyTo,
+};
+
 app.get("/api/rooms/:id/messages", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const { id } = req.params as { id: string };
+  const q = historyQuery.parse(req.query);
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
   if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const rows = db
-    .select({
-      id: messages.id,
-      roomId: messages.roomId,
-      userId: messages.userId,
-      username: users.username,
-      avatarAt: users.avatarAt,
-      text: messages.text,
-      editedAt: messages.editedAt,
-      createdAt: messages.createdAt,
-    })
+    .select(messageCols)
+    .from(messages)
+    .innerJoin(users, eq(messages.userId, users.id))
+    .where(
+      q.before
+        ? and(eq(messages.roomId, id), lt(messages.createdAt, q.before))
+        : eq(messages.roomId, id),
+    )
+    .orderBy(desc(messages.createdAt))
+    .limit(q.limit)
+    .all();
+  return decorate(rows.reverse());
+});
+
+app.get("/api/rooms/:id/search", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const { q } = searchQuery.parse(req.query);
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
+  const needle = fold(q);
+  const rows = db
+    .select(messageCols)
     .from(messages)
     .innerJoin(users, eq(messages.userId, users.id))
     .where(eq(messages.roomId, id))
     .orderBy(desc(messages.createdAt))
-    .limit(50)
+    .limit(5000)
     .all();
-    const ids = rows.map((r) => r.id);
-  const rx = ids.length
-    ? db.select().from(reactions).where(inArray(reactions.messageId, ids)).all()
-    : [];
-  return rows.reverse().map((r) => ({
-    ...r,
-    reactions: groupReactions(rx.filter((x) => x.messageId === r.id)),
-  }));
+  const found = rows.filter((r) => fold(r.text).includes(needle)).slice(0, 50);
+  return decorate(found);
 });
-
-function sendToRoom(roomId: string, data: unknown) {
-  for (const c of clients) if (c.roomId === roomId) c.send(data);
-}
-
-function groupReactions(rows: { emoji: string; userId: string }[]) {
-  const map = new Map<string, string[]>();
-  for (const r of rows) {
-    const list = map.get(r.emoji) ?? [];
-    list.push(r.userId);
-    map.set(r.emoji, list);
-  }
-  return [...map.entries()].map(([emoji, ids]) => ({ emoji, users: ids }));
-}
 
 app.patch("/api/messages/:id", async (req, reply) => {
   const user = requireUser(req, reply);
@@ -868,6 +968,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     return;
   }
 
+  let lastTyping = 0;
   const client: Client = {
     user,
     roomId: null,
@@ -909,36 +1010,64 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       }
       client.voiceRoomId = msg.roomId;
       broadcastPresence();
+    } else if (msg.type === "typing") {
+      if (!client.roomId) return;
+      const t = now();
+      if (t - lastTyping < 1200) return;
+      lastTyping = t;
+      sendToRoomExcept(client.roomId, client, {
+        type: "typing",
+        roomId: client.roomId,
+        userId: client.user.id,
+        username: client.user.username,
+      });
     } else if (msg.type === "say") {
       if (!client.roomId) return;
+      let replyTo: string | null = null;
+      if (msg.replyTo) {
+        const parent = db
+          .select({ roomId: messages.roomId })
+          .from(messages)
+          .where(eq(messages.id, msg.replyTo))
+          .get();
+        if (parent && parent.roomId === client.roomId) replyTo = msg.replyTo;
+      }
       const saved = {
         id: randomUUID(),
         roomId: client.roomId,
         userId: client.user.id,
         text: msg.text,
         createdAt: now(),
+        replyTo,
       };
       db.insert(messages).values(saved).run();
-            const out = {
+      const mentions = resolveMentions(msg.text);
+      const preview = replyTo ? (replyPreviews([replyTo]).get(replyTo) ?? null) : null;
+      const out = {
         type: "message",
         message: {
           ...saved,
           editedAt: null,
+          reply: preview,
+          mentions,
+          reactions: [],
           username: client.user.username,
           avatarAt: client.user.avatarAt,
         },
       };
       const room = db.select().from(rooms).where(eq(rooms.id, saved.roomId)).get();
-      const note = {
-        type: "activity",
-        roomId: saved.roomId,
-        roomName: room?.name ?? "",
-        username: client.user.username,
-        text: msg.text.slice(0, 120),
-      };
       for (const c of clients) {
         if (c.roomId === saved.roomId) c.send(out);
-        else if (c.user.id !== client.user.id && room && canAccess(room, c.user)) c.send(note);
+        else if (c.user.id !== client.user.id && room && canAccess(room, c.user)) {
+          c.send({
+            type: "activity",
+            roomId: saved.roomId,
+            roomName: room.name,
+            username: client.user.username,
+            text: msg.text.slice(0, 120),
+            mention: mentions.includes(c.user.id),
+          });
+        }
       }
     }
   });

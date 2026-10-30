@@ -7,6 +7,7 @@
   import { voice } from "$lib/voice.svelte";
   import Avatar from "$lib/Avatar.svelte";
   import Toggle from "$lib/Toggle.svelte";
+  import Select from "$lib/Select.svelte";
 
   let { user, onback, onsaved }: {
     user: User;
@@ -44,6 +45,19 @@
 
   const canSink =
     typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
+
+      const micOpts = $derived([
+    { value: "", label: "Varsayılan" },
+    ...devices.mics
+      .filter((d) => d.deviceId !== "default" && d.deviceId !== "communications")
+      .map((d) => ({ value: d.deviceId, label: d.label || "Mikrofon" })),
+  ]);
+  const speakerOpts = $derived([
+    { value: "", label: "Varsayılan" },
+    ...devices.speakers
+      .filter((d) => d.deviceId !== "default" && d.deviceId !== "communications")
+      .map((d) => ({ value: d.deviceId, label: d.label || "Hoparlör" })),
+  ]);
 
   onMount(() => {
     devices.refresh();
@@ -362,17 +376,21 @@
       {#if devices.labelsHidden}
         <button onclick={() => devices.askPermission()}>Cihaz adlarını göster (mikrofon izni ister)</button>
       {/if}
-      <label>
-        Mikrofon
-        <select value={prefs.micId} onchange={(e) => changeMic(e.currentTarget.value)}>
-          <option value="">Varsayılan</option>
-          {#each devices.mics as d (d.deviceId)}
-            {#if d.deviceId !== "default" && d.deviceId !== "communications"}
-              <option value={d.deviceId}>{d.label || "Mikrofon"}</option>
-            {/if}
-          {/each}
-        </select>
-      </label>
+            <div class="field">
+        <small>Mikrofon</small>
+        <Select value={prefs.micId} options={micOpts} block onchange={(v) => changeMic(v)} />
+      </div>
+      {#if canSink}
+        <div class="field">
+          <small>Kulaklık / hoparlör</small>
+          <Select
+            value={prefs.speakerId}
+            options={speakerOpts}
+            block
+            onchange={(v) => voice.setSpeakerDevice(v)}
+          />
+        </div>
+      {/if}
       {#if canSink}
         <label>
           Kulaklık / hoparlör
@@ -521,7 +539,7 @@
   .bgrow { display: flex; gap: 8px; flex-wrap: wrap; }
   .rng input { padding: 0; border: 0; accent-color: var(--accent); }
 
-  select { width: 100%; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
   .meter { height: 10px; border-radius: 999px; background: var(--soft); overflow: hidden; }
   .meter i { display: block; height: 100%; background: var(--accent); transition: width 0.06s; }
   .seg2 { display: flex; gap: 6px; }

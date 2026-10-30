@@ -73,6 +73,7 @@ export const messages = sqliteTable("messages", {
   userId: text("user_id").notNull(),
   text: text("text").notNull(),
   editedAt: integer("edited_at"),
+  replyTo: text("reply_to"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -177,5 +178,10 @@ sqlite.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_reactions_msg ON reactions (message_id);
 `);
+
+const msgCols2 = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+if (!msgCols2.some((c) => c.name === "reply_to")) {
+  sqlite.exec("ALTER TABLE messages ADD COLUMN reply_to TEXT");
+}
 
 export const db = drizzle(sqlite);
