@@ -28,6 +28,12 @@
     { value: "away", label: "🟡 Dışarıda" },
     { value: "invisible", label: "⚫ Görünmez" },
   ];
+  const INVITE_OPTS = [
+    { value: "1", label: "1 saat" },
+    { value: "24", label: "1 gün" },
+    { value: "168", label: "7 gün" },
+    { value: "0", label: "Süresiz" },
+  ];
 
   const staff = $derived(user.role === "owner" || user.role === "admin");
 
@@ -36,7 +42,8 @@
   let newName = $state("");
   let newPrivate = $state(false);
   let newPw = $state("");
-  let invite = $state("");
+  let inviteHours = $state("24");
+  let invite = $state<{ code: string; expiresAt: number | null } | null>(null);
   let error = $state("");
   let confirmId = $state<string | null>(null);
   let confirmTimer: number | undefined;
@@ -46,6 +53,14 @@
 
   const dmUnread = $derived(social.dms.reduce((n, d) => n + (live.unread[d.id] ?? 0), 0));
   const reqCount = $derived(social.friends.incoming.length);
+
+  const fmt = (t: number) =>
+    new Date(t).toLocaleString("tr-TR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
   async function load() {
     rooms = await api<Room[]>("/api/rooms");
@@ -92,8 +107,12 @@
   async function makeInvite() {
     error = "";
     try {
-      const r = await api<{ code: string }>("/api/invites", { method: "POST", body: {} });
-      invite = r.code;
+      const h = Number(inviteHours);
+      const r = await api<{ code: string; expiresAt: number | null }>("/api/invites", {
+        method: "POST",
+        body: { hours: h || null },
+      });
+      invite = r;
       navigator.clipboard?.writeText(r.code).catch(() => {});
     } catch (err) {
       error = err instanceof Error ? err.message : "Kod üretilemedi";
@@ -160,10 +179,18 @@
         title="Durumun"
         onchange={(v) => live.setStatus(v as Status)}
       />
-      <button onclick={onprofile}>Profil</button>
+      <button onclick={onprofile}>Ayarlar</button>
       {#if staff}
         <button onclick={onadmin}>Yönetim</button>
-        <button onclick={makeInvite}>Davet kodu</button>
+        <span class="inv">
+          <Select
+            value={inviteHours}
+            options={INVITE_OPTS}
+            title="Davet kodunun geçerlilik süresi"
+            onchange={(v) => (inviteHours = v)}
+          />
+          <button onclick={makeInvite}>Davet kodu</button>
+        </span>
       {/if}
       <button onclick={onlogout}>Çıkış</button>
     </div>
@@ -171,7 +198,8 @@
 
   {#if invite}
     <div class="card note">
-      Arkadaşına ver: <code>{invite}</code> (tek kullanımlık, panoya kopyalandı)
+      Arkadaşına ver: <code>{invite.code}</code>
+      (tek kullanımlık · {invite.expiresAt ? `${fmt(invite.expiresAt)} tarihine kadar geçerli` : "süresiz"} · panoya kopyalandı)
     </div>
   {/if}
   {#if error}
@@ -190,84 +218,87 @@
 
   <div class="layout">
     <div class="main">
-      {#if tab === "rooms"}
-        <section class="grid">
-          {#each rooms as r (r.id)}
-            {@const talking = live.voice[r.id] ?? []}
-            {@const viewing = live.presence[r.id] ?? []}
-            {@const people = talking}
-            <div class="cell">
-              {#if unlockId === r.id}
-                <form class="room card" onsubmit={(e) => unlock(e, r)}>
-                  <h2>🔒 {r.name}</h2>
-                  <PasswordInput bind:value={unlockPw} placeholder="Oda şifresi" autocomplete="off" />
-                  {#if unlockErr}<small class="err">{unlockErr}</small>{/if}
-                  <div class="row">
-                    <button class="primary">Gir</button>
-                    <button type="button" onclick={() => (unlockId = null)}>Vazgeç</button>
-                  </div>
-                </form>
-              {:else}
-                <button class="room card" onclick={() => pick(r)}>
-                  <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
-                  <div class="faces">
-                    {#each people.slice(0, 5) as p (p.id)}
-                      <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
-                    {/each}
-                    {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
-                  </div>
-                  <small>{talking.length || viewing.length ? [talking.length ? `🔊 ${talking.length} seste` : "", viewing.length ? `💬 ${viewing.length} sohbette` : ""].filter(Boolean).join(" · ") : "Şu an boş"}</small>
-                </button>
-                {#if r.canDelete}
-                  <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
-                    {confirmId === r.id ? "Silinsin mi?" : "✕"}
+      <div class="content">
+        {#if tab === "rooms"}
+          <section class="grid">
+            {#each rooms as r (r.id)}
+              {@const talking = live.voice[r.id] ?? []}
+              {@const viewing = live.presence[r.id] ?? []}
+              {@const people = talking}
+              <div class="cell">
+                {#if unlockId === r.id}
+                  <form class="room card" onsubmit={(e) => unlock(e, r)}>
+                    <h2>🔒 {r.name}</h2>
+                    <PasswordInput bind:value={unlockPw} placeholder="Oda şifresi" autocomplete="off" />
+                    {#if unlockErr}<small class="err">{unlockErr}</small>{/if}
+                    <div class="row">
+                      <button class="primary">Gir</button>
+                      <button type="button" onclick={() => (unlockId = null)}>Vazgeç</button>
+                    </div>
+                  </form>
+                {:else}
+                  <button class="room card" onclick={() => pick(r)}>
+                    <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
+                    <div class="faces">
+                      {#each people.slice(0, 5) as p (p.id)}
+                        <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
+                      {/each}
+                      {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
+                    </div>
+                    <small>{talking.length || viewing.length ? [talking.length ? `🔊 ${talking.length} seste` : "", viewing.length ? `💬 ${viewing.length} sohbette` : ""].filter(Boolean).join(" · ") : "Şu an boş"}</small>
                   </button>
+                  {#if r.canDelete}
+                    <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
+                      {confirmId === r.id ? "Silinsin mi?" : "✕"}
+                    </button>
+                  {/if}
+                  {#if !r.locked || r.access}
+                    <button
+                      class="bell"
+                      title={prefs.isMuted(r.id) ? "Bildirimleri aç" : "Bildirimleri kapat"}
+                      onclick={() => prefs.toggleMute(r.id)}
+                    >{prefs.isMuted(r.id) ? "🔕" : "🔔"}</button>
+                  {/if}
                 {/if}
-                {#if !r.locked || r.access}
-                  <button
-                    class="bell"
-                    title={prefs.isMuted(r.id) ? "Bildirimleri aç" : "Bildirimleri kapat"}
-                    onclick={() => prefs.toggleMute(r.id)}
-                  >{prefs.isMuted(r.id) ? "🔕" : "🔔"}</button>
-                {/if}
-              {/if}
-            </div>
-          {/each}
+              </div>
+            {/each}
 
-          <form class="room card new" onsubmit={createRoom}>
-            <input bind:value={newName} placeholder="Yeni oda adı" maxlength="40" />
-            <div class="seg">
-              <button type="button" class:on={!newPrivate} onclick={() => (newPrivate = false)}>Herkese açık</button>
-              <button type="button" class:on={newPrivate} onclick={() => (newPrivate = true)}>🔒 Şifreli</button>
-            </div>
-            {#if newPrivate}
-              <PasswordInput
-                bind:value={newPw}
-                placeholder="Oda şifresi (en az 4)"
-                maxlength={64}
-                autocomplete="new-password"
-              />
-              <small>Kurucu her odaya girebilir.</small>
-            {/if}
-            <button class="primary">Oda aç</button>
-          </form>
-        </section>
-      {:else if tab === "dms"}
-        <DmTab {onopen} />
-      {:else}
-        <FriendsTab {onopen} />
-      {/if}
+            <form class="room card new" onsubmit={createRoom}>
+              <input bind:value={newName} placeholder="Yeni oda adı" maxlength="40" />
+              <div class="seg">
+                <button type="button" class:on={!newPrivate} onclick={() => (newPrivate = false)}>Herkese açık</button>
+                <button type="button" class:on={newPrivate} onclick={() => (newPrivate = true)}>🔒 Şifreli</button>
+              </div>
+              {#if newPrivate}
+                <PasswordInput
+                  bind:value={newPw}
+                  placeholder="Oda şifresi (en az 4)"
+                  maxlength={64}
+                  autocomplete="new-password"
+                />
+                <small>Kurucu her odaya girebilir.</small>
+              {/if}
+              <button class="primary">Oda aç</button>
+            </form>
+          </section>
+        {:else if tab === "dms"}
+          <DmTab {onopen} />
+        {:else}
+          <FriendsTab {onopen} />
+        {/if}
+      </div>
     </div>
 
-    <ActivePanel meId={user.id} {onopen} />
+    <ActivePanel me={user} {onopen} />
   </div>
 </div>
 
 <style>
-  .page { padding: 22px 22px 90px; max-width: 1180px; margin: 0 auto; }
+  .page { padding: 22px 22px 90px; }
   header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 1.8rem; }
   .right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .inv { display: inline-flex; align-items: center; gap: 6px; }
   .av { position: relative; display: inline-flex; }
   .role { font-size: 0.75rem; background: var(--soft); color: var(--muted); padding: 2px 10px; border-radius: 999px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #c9bfb2; }
@@ -281,8 +312,9 @@
   .badge { background: var(--accent); color: var(--accent-ink); border-radius: 999px; font-size: 0.75rem; padding: 1px 8px; }
   .tabs button.on .badge { background: var(--accent-ink); color: var(--accent); }
 
-  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 18px; align-items: start; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; align-items: start; }
   .main { min-width: 0; }
+  .content { max-width: 1000px; margin: 0 auto; }
   @media (max-width: 880px) {
     .layout { grid-template-columns: 1fr; }
   }

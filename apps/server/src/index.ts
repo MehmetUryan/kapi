@@ -2,11 +2,15 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createReadStream, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { and, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import {
+  attachments,
+  customEmojis,
   db,
   friendships,
   invites,
@@ -28,12 +32,21 @@ try {
   // .env yoksa sesli oda çalışmaz, geri kalan her şey çalışır
 }
 
+const UPLOAD_DIR = fileURLToPath(new URL("../uploads/", import.meta.url));
+mkdirSync(UPLOAD_DIR, { recursive: true });
+const MAX_UPLOAD = 25 * 1024 * 1024;
+const IMAGE_TTL_DAYS = 30;
+const EMOJI_LIMIT = 5;
+const EMOJI_TOTAL_LIMIT = 300;
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 type Role = "owner" | "admin" | "member";
 type Status = "online" | "busy" | "away" | "invisible";
 type User = { id: string; username: string; avatarAt: number | null; role: Role };
 type Friend = { id: string; username: string; avatarAt: number | null };
 type Client = {
   user: User;
+  token: string;
   status: Status;
   idle: boolean;
   playing: string | null;
@@ -44,6 +57,7 @@ type Client = {
   close: () => void;
 };
 type RoomRow = typeof rooms.$inferSelect;
+type AttRow = typeof attachments.$inferSelect;
 
 const app = Fastify({ logger: { level: "warn" } });
 await app.register(cors, {
@@ -51,6 +65,13 @@ await app.register(cors, {
   methods: ["GET", "HEAD", "POST", "PATCH", "DELETE"],
 });
 await app.register(websocket);
+
+// resim yüklemeleri ham dosya olarak gelir
+app.addContentTypeParser(
+  ["image/jpeg", "image/png", "image/webp", "image/gif"],
+  { parseAs: "buffer", bodyLimit: MAX_UPLOAD },
+  (_req, body, done) => done(null, body),
+);
 
 const clients = new Set<Client>();
 const now = () => Date.now();
@@ -93,16 +114,58 @@ function addFail(key: string, windowMs: number) {
   else buckets.set(key, { n: 1, reset: now() + windowMs });
 }
 
-function makeInvite(createdBy: string | null) {
+function makeInvite(createdBy: string | null, ttlMs: number | null = null) {
   const code = randomBytes(6).toString("hex").toUpperCase();
-  db.insert(invites).values({ code, createdBy }).run();
-  return code;
+  const expiresAt = ttlMs ? now() + ttlMs : null;
+  db.insert(invites).values({ code, createdBy, expiresAt }).run();
+  return { code, expiresAt };
 }
 
-function createSession(userId: string) {
+function createSession(userId: string, device: string | null = null) {
   const token = randomBytes(32).toString("hex");
-  db.insert(sessions).values({ token, userId, createdAt: now() }).run();
+  db.insert(sessions)
+    .values({ token, userId, createdAt: now(), id: randomUUID(), lastSeen: now(), device })
+    .run();
   return token;
+}
+
+function deviceLabel(req: FastifyRequest): string {
+  const ua = String(req.headers["user-agent"] ?? "");
+  const kind = req.headers["x-kapi-client"] === "app" ? "Kapı uygulaması" : "Tarayıcı";
+  const os = /Windows/i.test(ua)
+    ? "Windows"
+    : /Android/i.test(ua)
+      ? "Android"
+      : /iPhone|iPad/i.test(ua)
+        ? "iOS"
+        : /Mac OS/i.test(ua)
+          ? "macOS"
+          : /Linux/i.test(ua)
+            ? "Linux"
+            : "Bilinmeyen cihaz";
+  let browser = "";
+  if (kind === "Tarayıcı") {
+    browser = /Edg\//i.test(ua)
+      ? " · Edge"
+      : /OPR\//i.test(ua)
+        ? " · Opera"
+        : /Firefox\//i.test(ua)
+          ? " · Firefox"
+          : /Chrome\//i.test(ua)
+            ? " · Chrome/Brave"
+            : /Safari\//i.test(ua)
+              ? " · Safari"
+              : "";
+  }
+  return `${os} · ${kind}${browser}`.slice(0, 80);
+}
+
+const touched = new Map<string, number>();
+function touchSession(token: string) {
+  const t = now();
+  if ((touched.get(token) ?? 0) > t - 60_000) return;
+  touched.set(token, t);
+  db.update(sessions).set({ lastSeen: t }).where(eq(sessions.token, token)).run();
 }
 
 function userFromToken(token: string | undefined): User | null {
@@ -126,6 +189,7 @@ function requireUser(req: FastifyRequest, reply: FastifyReply) {
   const token = req.headers.authorization?.replace(/^Bearer /, "");
   const user = userFromToken(token);
   if (!user) reply.code(401).send({ error: "Giriş gerekli" });
+  else if (token) touchSession(token);
   return user;
 }
 
@@ -201,6 +265,43 @@ function dmRoom(a: string, b: string) {
     .where(and(eq(rooms.kind, "dm"), eq(rooms.dmA, x), eq(rooms.dmB, y)))
     .get();
 }
+
+// ---------- resim dosyaları ----------
+function sniffImage(b: Buffer): string | null {
+  if (b.length < 16) return null;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b.subarray(0, 8).equals(PNG_SIG)) return "image/png";
+  if (b.subarray(0, 4).toString("ascii") === "GIF8") return "image/gif";
+  if (b.subarray(0, 4).toString("ascii") === "RIFF" && b.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return null;
+}
+
+const toAttachment = (a: AttRow | undefined) =>
+  a ? { id: a.id, mime: a.mime, size: a.size, w: a.w, h: a.h, expired: !!a.expired } : null;
+
+function dropFile(id: string) {
+  try {
+    unlinkSync(join(UPLOAD_DIR, id));
+  } catch {
+    // dosya zaten yok
+  }
+}
+
+function removeAttachments(ids: string[]) {
+  if (!ids.length) return;
+  for (const id of ids) dropFile(id);
+  db.delete(attachments).where(inArray(attachments.id, ids)).run();
+}
+
+const roomAttachmentIds = (roomId: string) =>
+  db
+    .select({ id: attachments.id })
+    .from(attachments)
+    .where(eq(attachments.roomId, roomId))
+    .all()
+    .map((a) => a.id);
 
 // ---------- ses oturumu kaydı (kullanım sayacı için) ----------
 function startVoice(c: Client, roomId: string) {
@@ -372,16 +473,29 @@ function replyPreviews(ids: string[]): Map<string, ReplyPreview> {
   const map = new Map<string, ReplyPreview>();
   if (!ids.length) return map;
   const rows = db
-    .select({ id: messages.id, text: messages.text, username: users.username })
+    .select({
+      id: messages.id,
+      text: messages.text,
+      attachmentId: messages.attachmentId,
+      username: users.username,
+    })
     .from(messages)
     .innerJoin(users, eq(messages.userId, users.id))
     .where(inArray(messages.id, ids))
     .all();
-  for (const r of rows) map.set(r.id, { id: r.id, username: r.username, text: r.text.slice(0, 140) });
+  for (const r of rows) {
+    map.set(r.id, {
+      id: r.id,
+      username: r.username,
+      text: (r.text || (r.attachmentId ? "📷 Resim" : "")).slice(0, 140),
+    });
+  }
   return map;
 }
 
-function decorate<T extends { id: string; text: string; replyTo: string | null }>(rows: T[]) {
+function decorate<
+  T extends { id: string; text: string; replyTo: string | null; attachmentId: string | null },
+>(rows: T[]) {
   const parents = [...new Set(rows.map((r) => r.replyTo).filter((x): x is string => !!x))];
   const previews = replyPreviews(parents);
   const rx = rows.length
@@ -391,11 +505,82 @@ function decorate<T extends { id: string; text: string; replyTo: string | null }
         .where(inArray(reactions.messageId, rows.map((r) => r.id)))
         .all()
     : [];
+  const attIds = rows.map((r) => r.attachmentId).filter((x): x is string => !!x);
+  const atts = new Map(
+    (attIds.length
+      ? db.select().from(attachments).where(inArray(attachments.id, attIds)).all()
+      : []
+    ).map((a) => [a.id, a] as [string, AttRow]),
+  );
   return rows.map((r) => ({
     ...r,
     reply: r.replyTo ? (previews.get(r.replyTo) ?? null) : null,
     reactions: groupReactions(rx.filter((x) => x.messageId === r.id)),
+    attachment: r.attachmentId ? toAttachment(atts.get(r.attachmentId)) : null,
   }));
+}
+
+function postMessage(
+  user: User,
+  roomId: string,
+  text: string,
+  replyToId: string | null,
+  attachmentId: string | null,
+) {
+  let replyTo: string | null = null;
+  if (replyToId) {
+    const parent = db
+      .select({ roomId: messages.roomId })
+      .from(messages)
+      .where(eq(messages.id, replyToId))
+      .get();
+    if (parent && parent.roomId === roomId) replyTo = replyToId;
+  }
+  const saved = {
+    id: randomUUID(),
+    roomId,
+    userId: user.id,
+    text,
+    createdAt: now(),
+    replyTo,
+    attachmentId,
+  };
+  db.insert(messages).values(saved).run();
+  const mentions = resolveMentions(text);
+  const preview = replyTo ? (replyPreviews([replyTo]).get(replyTo) ?? null) : null;
+  const att = attachmentId
+    ? toAttachment(db.select().from(attachments).where(eq(attachments.id, attachmentId)).get())
+    : null;
+  const out = {
+    type: "message",
+    message: {
+      ...saved,
+      editedAt: null,
+      reply: preview,
+      mentions,
+      reactions: [],
+      attachment: att,
+      username: user.username,
+      avatarAt: user.avatarAt,
+    },
+  };
+  const room = db.select().from(rooms).where(eq(rooms.id, roomId)).get();
+  const isDm = room?.kind === "dm";
+  for (const c of clients) {
+    if (c.roomId === roomId) c.send(out);
+    else if (c.user.id !== user.id && room && canAccess(room, c.user)) {
+      c.send({
+        type: "activity",
+        roomId,
+        roomName: isDm ? "Özel mesaj" : room.name,
+        dm: isDm,
+        username: user.username,
+        text: (text || "📷 Resim").slice(0, 120),
+        mention: !isDm && mentions.includes(c.user.id),
+      });
+    }
+  }
+  if (isDm && room?.dmA && room.dmB) notifyUsers([room.dmA, room.dmB], { type: "dms" });
 }
 
 // Türkçe harflere duyarsız arama için
@@ -432,6 +617,14 @@ const friendBody = z.object({ username: z.string().trim().min(3).max(20) });
 const dmBody = z.object({ userId: z.string().min(1).max(64) });
 const roleBody = z.object({ role: z.enum(["admin", "member"]) });
 const banBody = z.object({ banned: z.boolean() });
+const inviteBody = z.object({
+  hours: z.number().int().min(1).max(24 * 30).nullable().optional(),
+});
+const logoutBody = z.object({ others: z.boolean().default(false) });
+const emojiBody = z.object({
+  name: z.string().trim().toLowerCase().regex(/^[a-z0-9_]{2,20}$/),
+  image: z.string().regex(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/).max(140_000),
+});
 const passwordBody = z.object({
   oldPassword: z.string().max(100),
   newPassword: z.string().min(8).max(100),
@@ -478,7 +671,7 @@ app.post("/api/register", async (req, reply) => {
 
   const result = db.transaction((tx) => {
     const inv = tx.select().from(invites).where(eq(invites.code, body.invite)).get();
-    if (!inv || inv.usedBy) return "invite" as const;
+    if (!inv || inv.usedBy || (inv.expiresAt && inv.expiresAt < now())) return "invite" as const;
     const taken = tx.select().from(users).where(eq(users.username, body.username)).get();
     if (taken) return "taken" as const;
     const first = !tx.select({ id: users.id }).from(users).get();
@@ -497,11 +690,13 @@ app.post("/api/register", async (req, reply) => {
     return { id, role };
   });
 
-  if (result === "invite") return reply.code(403).send({ error: "Davet kodu geçersiz ya da kullanılmış" });
+  if (result === "invite") {
+    return reply.code(403).send({ error: "Davet kodu geçersiz, kullanılmış ya da süresi dolmuş" });
+  }
   if (result === "taken") return reply.code(409).send({ error: "Bu kullanıcı adı alınmış" });
   log("register", result.id);
   return {
-    token: createSession(result.id),
+    token: createSession(result.id, deviceLabel(req)),
     user: { id: result.id, username: body.username, avatarAt: null, role: result.role },
   };
 });
@@ -521,7 +716,7 @@ app.post("/api/login", async (req, reply) => {
   if (row.banned) return reply.code(403).send({ error: "Bu hesap engellendi" });
   buckets.delete(key);
   log("login", row.id);
-  return { token: createSession(row.id), user: toUser(row) };
+  return { token: createSession(row.id, deviceLabel(req)), user: toUser(row) };
 });
 
 // ---------- şifre ----------
@@ -572,7 +767,7 @@ app.post("/api/reset-password", async (req, reply) => {
   db.delete(sessions).where(eq(sessions.userId, u.id)).run();
   buckets.delete(key);
   log("password_reset", u.id);
-  return { token: createSession(u.id), user: toUser(u) };
+  return { token: createSession(u.id, deviceLabel(req)), user: toUser(u) };
 });
 
 app.post("/api/users/:id/reset-code", async (req, reply) => {
@@ -582,7 +777,7 @@ app.post("/api/users/:id/reset-code", async (req, reply) => {
   const target = db.select().from(users).where(eq(users.id, id)).get();
   if (!target) return reply.code(404).send({ error: "Kullanıcı bulunamadı" });
   if (target.id === me.id) {
-    return reply.code(400).send({ error: "Kendi şifreni Profil sayfasından değiştir" });
+    return reply.code(400).send({ error: "Kendi şifreni Ayarlar sayfasından değiştir" });
   }
   if (target.role === "owner") {
     return reply.code(403).send({ error: "Kurucunun şifresi buradan sıfırlanamaz" });
@@ -602,6 +797,66 @@ app.post("/api/users/:id/reset-code", async (req, reply) => {
     .run();
   log("reset_code", me.id, `hedef: ${target.username}`);
   return { code: `${code.slice(0, 5)}-${code.slice(5)}`, expiresAt };
+});
+
+// ---------- oturumlar ----------
+app.get("/api/me/sessions", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const cur = req.headers.authorization?.replace(/^Bearer /, "") ?? "";
+  const rows = db
+    .select({
+      token: sessions.token,
+      id: sessions.id,
+      device: sessions.device,
+      createdAt: sessions.createdAt,
+      lastSeen: sessions.lastSeen,
+    })
+    .from(sessions)
+    .where(eq(sessions.userId, me.id))
+    .orderBy(desc(sessions.lastSeen))
+    .all();
+  const onlineTokens = new Set([...clients].map((c) => c.token));
+  return rows.map((r) => ({
+    id: r.id,
+    device: r.device ?? "Bilinmeyen cihaz",
+    createdAt: r.createdAt,
+    lastSeen: r.lastSeen ?? r.createdAt,
+    current: r.token === cur,
+    online: onlineTokens.has(r.token),
+  }));
+});
+
+app.delete("/api/me/sessions/:id", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const row = db
+    .select()
+    .from(sessions)
+    .where(and(eq(sessions.id, id), eq(sessions.userId, me.id)))
+    .get();
+  if (!row) return reply.code(404).send({ error: "Oturum bulunamadı" });
+  db.delete(sessions).where(eq(sessions.token, row.token)).run();
+  for (const c of [...clients]) if (c.token === row.token) c.close();
+  log("session_revoke", me.id, row.device ?? "Bilinmeyen cihaz");
+  return { ok: true };
+});
+
+app.post("/api/me/logout-all", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const body = logoutBody.parse(req.body ?? {});
+  const cur = req.headers.authorization?.replace(/^Bearer /, "") ?? "";
+  const cond = body.others
+    ? and(eq(sessions.userId, me.id), ne(sessions.token, cur))
+    : eq(sessions.userId, me.id);
+  const rows = db.select({ token: sessions.token }).from(sessions).where(cond).all();
+  db.delete(sessions).where(cond).run();
+  const tokens = new Set(rows.map((r) => r.token));
+  for (const c of [...clients]) if (tokens.has(c.token)) c.close();
+  log(body.others ? "logout_others" : "logout_all", me.id, `${rows.length} oturum kapatıldı`);
+  return { ok: true };
 });
 
 // ---------- profil ----------
@@ -636,7 +891,6 @@ app.patch("/api/me", async (req, reply) => {
   for (const c of clients) if (c.user.id === user.id) c.user = fresh;
   broadcastPresence();
   schedulePeople();
-  notifyUsers([], null);
   return fresh;
 });
 
@@ -661,6 +915,88 @@ app.get("/api/members", async (req, reply) => {
     .where(eq(users.banned, 0))
     .orderBy(users.username)
     .all();
+});
+
+// ---------- özel emoji ----------
+app.get("/api/emojis", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  return db
+    .select({
+      id: customEmojis.id,
+      name: customEmojis.name,
+      createdBy: customEmojis.createdBy,
+      creator: users.username,
+    })
+    .from(customEmojis)
+    .leftJoin(users, eq(customEmojis.createdBy, users.id))
+    .orderBy(customEmojis.name)
+    .all();
+});
+
+app.get("/api/emojis/:id/image", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const row = db
+    .select({ image: customEmojis.image })
+    .from(customEmojis)
+    .where(eq(customEmojis.id, id))
+    .get();
+  if (!row) return reply.code(404).send();
+  const b64 = row.image.split(",")[1] ?? "";
+  return reply
+    .header("Content-Type", "image/png")
+    .header("Cache-Control", "public, max-age=31536000, immutable")
+    .send(Buffer.from(b64, "base64"));
+});
+
+app.post("/api/emojis", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const body = emojiBody.parse(req.body);
+  const png = Buffer.from(body.image.split(",")[1] ?? "", "base64");
+  if (png.length > 100_000 || !png.subarray(0, 8).equals(PNG_SIG)) {
+    return reply.code(400).send({ error: "Geçerli bir PNG gerekli (en fazla 100 KB)" });
+  }
+  const total = db.select({ n: sql<number>`count(*)` }).from(customEmojis).get()?.n ?? 0;
+  if (total >= EMOJI_TOTAL_LIMIT) {
+    return reply.code(400).send({ error: "Sunucudaki emoji sınırına ulaşıldı" });
+  }
+  if (me.role !== "owner") {
+    const mine =
+      db
+        .select({ n: sql<number>`count(*)` })
+        .from(customEmojis)
+        .where(eq(customEmojis.createdBy, me.id))
+        .get()?.n ?? 0;
+    if (mine >= EMOJI_LIMIT) {
+      return reply.code(400).send({ error: `En fazla ${EMOJI_LIMIT} emoji ekleyebilirsin` });
+    }
+  }
+  if (db.select().from(customEmojis).where(eq(customEmojis.name, body.name)).get()) {
+    return reply.code(409).send({ error: "Bu emoji adı alınmış" });
+  }
+  const id = randomUUID();
+  db.insert(customEmojis)
+    .values({ id, name: body.name, createdBy: me.id, createdAt: now(), image: body.image })
+    .run();
+  log("emoji_add", me.id, body.name);
+  for (const c of clients) c.send({ type: "emojis" });
+  return { id, name: body.name };
+});
+
+app.delete("/api/emojis/:id", async (req, reply) => {
+  const me = requireUser(req, reply);
+  if (!me) return reply;
+  const { id } = req.params as { id: string };
+  const e = db.select().from(customEmojis).where(eq(customEmojis.id, id)).get();
+  if (!e) return reply.code(404).send({ error: "Emoji bulunamadı" });
+  if (e.createdBy !== me.id && !isStaff(me)) {
+    return reply.code(403).send({ error: "Bu emojiyi silemezsin" });
+  }
+  db.delete(customEmojis).where(eq(customEmojis.id, id)).run();
+  log("emoji_delete", me.id, e.name);
+  for (const c of clients) c.send({ type: "emojis" });
+  return { ok: true };
 });
 
 // ---------- arkadaşlar ----------
@@ -817,7 +1153,12 @@ app.get("/api/dms", async (req, reply) => {
     const peer = publicUser(peerId);
     if (!peer) continue;
     const last = db
-      .select({ text: messages.text, createdAt: messages.createdAt, userId: messages.userId })
+      .select({
+        text: messages.text,
+        attachmentId: messages.attachmentId,
+        createdAt: messages.createdAt,
+        userId: messages.userId,
+      })
       .from(messages)
       .where(eq(messages.roomId, r.id))
       .orderBy(desc(messages.createdAt))
@@ -827,7 +1168,7 @@ app.get("/api/dms", async (req, reply) => {
     out.push({
       id: r.id,
       user: toFriend(peer),
-      lastText: last.text.slice(0, 80),
+      lastText: (last.text || (last.attachmentId ? "📷 Resim" : "")).slice(0, 80),
       lastAt: last.createdAt,
       lastMine: last.userId === me.id,
     });
@@ -837,12 +1178,15 @@ app.get("/api/dms", async (req, reply) => {
 });
 
 // ---------- yönetim ----------
-app.post("/api/invites", async (req, reply) => {
+const invitePost = async (req: FastifyRequest, reply: FastifyReply) => {
   const user = requireStaff(req, reply);
   if (!user) return reply;
-  log("invite_create", user.id);
-  return { code: makeInvite(user.id) };
-});
+  const body = inviteBody.parse(req.body ?? {});
+  const inv = makeInvite(user.id, body.hours ? body.hours * 3_600_000 : null);
+  log("invite_create", user.id, inv.expiresAt ? `${body.hours} saat geçerli` : "süresiz");
+  return inv;
+};
+app.post("/api/invites", invitePost);
 
 app.get("/api/users", async (req, reply) => {
   const me = requireStaff(req, reply);
@@ -873,10 +1217,39 @@ app.get("/api/logs", async (req, reply) => {
     .all();
 });
 
+// günlüğü sadece kurucu temizleyebilir
+app.delete("/api/logs", async (req, reply) => {
+  const me = requireOwner(req, reply);
+  if (!me) return reply;
+  const n = db.select({ n: sql<number>`count(*)` }).from(logs).get()?.n ?? 0;
+  db.delete(logs).run();
+  log("logs_clear", me.id, `${n} kayıt silindi`);
+  return { ok: true, count: n };
+});
+
 app.get("/api/usage", async (req, reply) => {
   const me = requireStaff(req, reply);
   if (!me) return reply;
   return usage();
+});
+
+app.get("/api/storage", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const row = db
+    .select({
+      n: sql<number>`count(*)`,
+      bytes: sql<number>`coalesce(sum(${attachments.size}), 0)`,
+    })
+    .from(attachments)
+    .where(eq(attachments.expired, 0))
+    .get();
+  return {
+    count: row?.n ?? 0,
+    bytes: row?.bytes ?? 0,
+    ttlDays: IMAGE_TTL_DAYS,
+    maxMb: MAX_UPLOAD / 1024 / 1024,
+  };
 });
 
 app.patch("/api/users/:id/role", async (req, reply) => {
@@ -952,6 +1325,23 @@ app.delete("/api/users/:id", async (req, reply) => {
       void kickFromVoice(voiceRoom, id);
     }
   }
+  // resim dosyalarını sil
+  const dmRoomIds = db
+    .select({ id: rooms.id })
+    .from(rooms)
+    .where(and(eq(rooms.kind, "dm"), or(eq(rooms.dmA, id), eq(rooms.dmB, id))))
+    .all()
+    .map((r) => r.id);
+  removeAttachments(
+    db
+      .select({ id: attachments.id })
+      .from(attachments)
+      .where(eq(attachments.userId, id))
+      .all()
+      .map((a) => a.id),
+  );
+  for (const rid of dmRoomIds) removeAttachments(roomAttachmentIds(rid));
+
   const dmIds = sql`(SELECT id FROM rooms WHERE kind = 'dm' AND (dm_a = ${id} OR dm_b = ${id}))`;
   db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id IN ${dmIds})`);
   db.run(sql`DELETE FROM messages WHERE room_id IN ${dmIds}`);
@@ -987,6 +1377,7 @@ app.get("/api/rooms", async (req, reply) => {
     locked: !!r.passwordHash,
     access: canAccess(r, user),
     canDelete: i > 0 && (r.createdBy === user.id || isStaff(user)),
+    canClear: r.createdBy === user.id || isStaff(user),
   }));
 });
 
@@ -1043,6 +1434,7 @@ const messageCols = {
   createdAt: messages.createdAt,
   editedAt: messages.editedAt,
   replyTo: messages.replyTo,
+  attachmentId: messages.attachmentId,
 };
 
 app.get("/api/rooms/:id/messages", async (req, reply) => {
@@ -1089,6 +1481,77 @@ app.get("/api/rooms/:id/search", async (req, reply) => {
   return decorate(found);
 });
 
+// ---------- resim yükleme ve indirme ----------
+app.post("/api/rooms/:id/images", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
+
+  const key = `upload:${user.id}`;
+  if (isLimited(key, 30)) {
+    return reply.code(429).send({ error: "Çok fazla resim gönderdin. Biraz bekle." });
+  }
+  const body = req.body;
+  if (!Buffer.isBuffer(body)) return reply.code(400).send({ error: "Resim okunamadı" });
+  const mime = sniffImage(body);
+  if (!mime) {
+    return reply.code(400).send({ error: "Desteklenmeyen dosya (JPG, PNG, WebP ya da GIF olmalı)" });
+  }
+
+  const hdr = (v: unknown) => (Array.isArray(v) ? String(v[0] ?? "") : String(v ?? ""));
+  let caption = "";
+  try {
+    caption = decodeURIComponent(hdr(req.headers["x-kapi-text"])).trim().slice(0, 500);
+  } catch {
+    caption = "";
+  }
+  const replyId = hdr(req.headers["x-kapi-reply"]).slice(0, 64) || null;
+  const dim = (v: unknown) => {
+    const n = Number.parseInt(hdr(v), 10);
+    return Number.isFinite(n) && n > 0 && n <= 20000 ? n : null;
+  };
+
+  const attId = randomUUID();
+  writeFileSync(join(UPLOAD_DIR, attId), body);
+  db.insert(attachments)
+    .values({
+      id: attId,
+      roomId: id,
+      userId: user.id,
+      mime,
+      size: body.length,
+      w: dim(req.headers["x-kapi-w"]),
+      h: dim(req.headers["x-kapi-h"]),
+      createdAt: now(),
+    })
+    .run();
+  addFail(key, 10 * 60_000);
+  postMessage(user, id, caption, replyId, attId);
+  return { ok: true };
+});
+
+app.get("/api/files/:id", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const a = db.select().from(attachments).where(eq(attachments.id, id)).get();
+  if (!a || a.expired) return reply.code(404).send({ error: "Dosya bulunamadı" });
+  const room = db.select().from(rooms).where(eq(rooms.id, a.roomId)).get();
+  if (!room || !canAccess(room, user)) return reply.code(403).send({ error: "Erişimin yok" });
+  const file = join(UPLOAD_DIR, a.id);
+  if (!existsSync(file)) return reply.code(404).send({ error: "Dosya bulunamadı" });
+  return reply
+    .header("Content-Type", a.mime)
+    .header("X-Content-Type-Options", "nosniff")
+    .header("Cache-Control", "private, max-age=86400")
+    .header("Content-Disposition", "inline")
+    .send(createReadStream(file));
+});
+
+// ---------- mesaj düzenle / sil / tepki ----------
 app.patch("/api/messages/:id", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
@@ -1123,6 +1586,7 @@ app.delete("/api/messages/:id", async (req, reply) => {
   if (!room || !canAccess(room, user)) {
     return reply.code(403).send({ error: "Bu odaya erişimin yok" });
   }
+  if (m.attachmentId) removeAttachments([m.attachmentId]);
   db.delete(reactions).where(eq(reactions.messageId, id)).run();
   db.delete(messages).where(eq(messages.id, id)).run();
   if (room.kind !== "dm") {
@@ -1179,6 +1643,30 @@ app.post("/api/messages/:id/reactions", async (req, reply) => {
   return { ok: true };
 });
 
+// sohbeti temizle: odayı kuran kişi, yönetici ve kurucu
+app.post("/api/rooms/:id/clear", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (room.kind === "dm") {
+    return reply.code(403).send({ error: "Özel mesajlar buradan temizlenemez" });
+  }
+  if (room.createdBy !== user.id && !isStaff(user)) {
+    return reply
+      .code(403)
+      .send({ error: "Sohbeti sadece odayı kuran kişi ya da yöneticiler temizleyebilir" });
+  }
+  const n = db.select({ n: sql<number>`count(*)` }).from(messages).where(eq(messages.roomId, id)).get()?.n ?? 0;
+  removeAttachments(roomAttachmentIds(id));
+  db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
+  db.delete(messages).where(eq(messages.roomId, id)).run();
+  log("chat_clear", user.id, `oda: ${room.name} · ${n} mesaj`);
+  sendToRoom(id, { type: "room-cleared", roomId: id, by: user.username });
+  return { ok: true, count: n };
+});
+
 app.delete("/api/rooms/:id", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
@@ -1193,6 +1681,7 @@ app.delete("/api/rooms/:id", async (req, reply) => {
       .code(403)
       .send({ error: "Bu odayı sadece açan kişi ya da yöneticiler silebilir" });
   }
+  removeAttachments(roomAttachmentIds(id));
   db.delete(roomMembers).where(eq(roomMembers.roomId, id)).run();
   db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
   db.delete(messages).where(eq(messages.roomId, id)).run();
@@ -1232,7 +1721,8 @@ app.post("/api/rooms/:id/voice-token", async (req, reply) => {
 
 // ---------- WebSocket ----------
 app.get("/ws", { websocket: true }, (socket, req) => {
-  const user = userFromToken((req.query as { token?: string }).token);
+  const wsToken = (req.query as { token?: string }).token ?? "";
+  const user = userFromToken(wsToken);
   if (!user) {
     socket.close(4401, "unauthorized");
     return;
@@ -1247,6 +1737,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
   let lastTyping = 0;
   const client: Client = {
     user,
+    token: wsToken,
     status: savedStatus,
     idle: false,
     playing: null,
@@ -1320,55 +1811,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
       });
     } else if (msg.type === "say") {
       if (!client.roomId) return;
-      let replyTo: string | null = null;
-      if (msg.replyTo) {
-        const parent = db
-          .select({ roomId: messages.roomId })
-          .from(messages)
-          .where(eq(messages.id, msg.replyTo))
-          .get();
-        if (parent && parent.roomId === client.roomId) replyTo = msg.replyTo;
-      }
-      const saved = {
-        id: randomUUID(),
-        roomId: client.roomId,
-        userId: client.user.id,
-        text: msg.text,
-        createdAt: now(),
-        replyTo,
-      };
-      db.insert(messages).values(saved).run();
-      const mentions = resolveMentions(msg.text);
-      const preview = replyTo ? (replyPreviews([replyTo]).get(replyTo) ?? null) : null;
-      const out = {
-        type: "message",
-        message: {
-          ...saved,
-          editedAt: null,
-          reply: preview,
-          mentions,
-          reactions: [],
-          username: client.user.username,
-          avatarAt: client.user.avatarAt,
-        },
-      };
-      const room = db.select().from(rooms).where(eq(rooms.id, saved.roomId)).get();
-      const isDm = room?.kind === "dm";
-      for (const c of clients) {
-        if (c.roomId === saved.roomId) c.send(out);
-        else if (c.user.id !== client.user.id && room && canAccess(room, c.user)) {
-          c.send({
-            type: "activity",
-            roomId: saved.roomId,
-            roomName: isDm ? "Özel mesaj" : room.name,
-            dm: isDm,
-            username: client.user.username,
-            text: msg.text.slice(0, 120),
-            mention: !isDm && mentions.includes(c.user.id),
-          });
-        }
-      }
-      if (isDm && room?.dmA && room.dmB) notifyUsers([room.dmA, room.dmB], { type: "dms" });
+      postMessage(client.user, client.roomId, msg.text, msg.replyTo ?? null, null);
     }
   });
 
@@ -1388,6 +1831,17 @@ function cleanup() {
   db.delete(resetCodes).where(lt(resetCodes.expiresAt, t)).run();
   db.run(sql`DELETE FROM reactions WHERE message_id NOT IN (SELECT id FROM messages)`);
   for (const [k, b] of buckets) if (b.reset < t) buckets.delete(k);
+
+  // 30 günden eski resimleri sil (mesaj kalır, "süresi doldu" yazar)
+  const old = db
+    .select({ id: attachments.id })
+    .from(attachments)
+    .where(and(eq(attachments.expired, 0), lt(attachments.createdAt, t - IMAGE_TTL_DAYS * 86_400_000)))
+    .all();
+  for (const a of old) {
+    dropFile(a.id);
+    db.update(attachments).set({ expired: 1 }).where(eq(attachments.id, a.id)).run();
+  }
 }
 
 // sunucu kapanırken açık kalmış ses oturumlarını kapat (en fazla 6 saat say)
@@ -1398,7 +1852,7 @@ for (const s of db.select().from(voiceSessions).where(isNull(voiceSessions.leftA
     .run();
 }
 cleanup();
-setInterval(cleanup, 24 * 3_600_000);
+setInterval(cleanup, 6 * 3_600_000);
 
 // ---------- başlangıç ----------
 if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
@@ -1408,9 +1862,10 @@ if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
 const port = Number(process.env.PORT ?? 3000);
 await app.listen({ port, host: "0.0.0.0" });
 console.log(`\n  Kapı sunucusu çalışıyor: http://localhost:${port}`);
+console.log("  Sunucu kodu: paket-8 (resim, emoji, temizleme, oturum günlüğü)");
 
 if (!db.select().from(users).get()) {
   const unused = db.select().from(invites).where(isNull(invites.usedBy)).get();
-  const code = unused?.code ?? makeInvite(null);
+  const code = unused?.code ?? makeInvite(null).code;
   console.log(`  İlk kayıt için davet kodu: ${code}\n`);
 }

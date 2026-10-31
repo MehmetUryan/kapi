@@ -3,6 +3,8 @@
   import { onMount } from "svelte";
   import { api, clearSession, getToken, type Room, type User } from "$lib/api";
   import { desktop } from "$lib/desktop.svelte";
+  import { emojis } from "$lib/emojis.svelte";
+  import { clearImageCache } from "$lib/imageCache";
   import { live } from "$lib/live.svelte";
   import { prefs } from "$lib/prefs.svelte";
   import { social } from "$lib/social.svelte";
@@ -11,7 +13,7 @@
   import Admin from "$lib/Admin.svelte";
   import Lobby from "$lib/Lobby.svelte";
   import Login from "$lib/Login.svelte";
-  import Profile from "$lib/Profile.svelte";
+  import Settings from "$lib/Settings.svelte";
   import RoomView from "$lib/RoomView.svelte";
   import UpdateBanner from "$lib/UpdateBanner.svelte";
   import VoiceBar from "$lib/VoiceBar.svelte";
@@ -29,6 +31,12 @@
     if (!id) return;
     if (room?.id === id) room = null;
     if (voice.room?.id === id) voice.leave();
+  });
+
+    // özel emojiler: girişte ve değişince yükle
+  $effect(() => {
+    live.emojisVersion;
+    if (user) emojis.load();
   });
 
   // rolün değişirse bilgilerini yeniden al
@@ -81,6 +89,8 @@
   function logout() {
     voice.leave();
     social.stop();
+    emojis.clear();
+    clearImageCache();
     live.disconnect();
     clearSession();
     user = null;
@@ -105,7 +115,12 @@
     <RoomView {room} {user} onback={() => (room = null)} />
   {:else if profile}
     <div class="scrollpage">
-      <Profile {user} onback={() => (profile = false)} onsaved={(u) => (user = u)} />
+  <Settings
+        {user}
+        onback={() => (profile = false)}
+        onsaved={(u) => (user = u)}
+        onlogout={logout}
+      />
     </div>
   {:else if admin}
     <div class="scrollpage"><Admin {user} onback={() => (admin = false)} /></div>

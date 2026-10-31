@@ -18,12 +18,16 @@ export const sessions = sqliteTable("sessions", {
   token: text("token").primaryKey(),
   userId: text("user_id").notNull(),
   createdAt: integer("created_at").notNull(),
+  id: text("id"),
+  lastSeen: integer("last_seen"),
+  device: text("device"),
 });
 
 export const invites = sqliteTable("invites", {
   code: text("code").primaryKey(),
   createdBy: text("created_by"),
   usedBy: text("used_by"),
+  expiresAt: integer("expires_at"),
 });
 
 export const rooms = sqliteTable("rooms", {
@@ -86,6 +90,7 @@ export const messages = sqliteTable("messages", {
   text: text("text").notNull(),
   editedAt: integer("edited_at"),
   replyTo: text("reply_to"),
+  attachmentId: text("attachment_id"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -216,6 +221,64 @@ sqlite.exec(`
     PRIMARY KEY (user_a, user_b)
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_pair ON rooms (dm_a, dm_b) WHERE kind = 'dm';
+`);
+
+export const attachments = sqliteTable("attachments", {
+  id: text("id").primaryKey(),
+  roomId: text("room_id").notNull(),
+  userId: text("user_id").notNull(),
+  mime: text("mime").notNull(),
+  size: integer("size").notNull(),
+  w: integer("w"),
+  h: integer("h"),
+  createdAt: integer("created_at").notNull(),
+  expired: integer("expired").notNull().default(0),
+});
+
+export const customEmojis = sqliteTable("custom_emojis", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: integer("created_at").notNull(),
+  image: text("image").notNull(),
+});
+
+const sesCols = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+if (!sesCols.some((c) => c.name === "id")) {
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN id TEXT");
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN last_seen INTEGER");
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN device TEXT");
+}
+sqlite.exec("UPDATE sessions SET id = lower(hex(randomblob(8))) WHERE id IS NULL");
+const invCols = sqlite.prepare("PRAGMA table_info(invites)").all() as { name: string }[];
+if (!invCols.some((c) => c.name === "expires_at")) {
+  sqlite.exec("ALTER TABLE invites ADD COLUMN expires_at INTEGER");
+}
+
+const msgCols3 = sqlite.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+if (!msgCols3.some((c) => c.name === "attachment_id")) {
+  sqlite.exec("ALTER TABLE messages ADD COLUMN attachment_id TEXT");
+}
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    w INTEGER,
+    h INTEGER,
+    created_at INTEGER NOT NULL,
+    expired INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_att_room ON attachments (room_id);
+  CREATE TABLE IF NOT EXISTS custom_emojis (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    image TEXT NOT NULL
+  );
 `);
 
 export const db = drizzle(sqlite);

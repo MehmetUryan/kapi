@@ -160,3 +160,16 @@ textarea {
   resize: none;
 }
 textarea:focus { border-color: var(--accent); }
+.pane { display: flex; flex-direction: column; gap: 14px; }
+.pane h2 { margin: 0; font-size: 1.15rem; }
+.pane h3 { margin: 8px 0 0; font-size: 0.95rem; }
+.pane label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.pane .field { display: flex; flex-direction: column; gap: 4px; }
+.pane small { color: var(--muted); }
+.pane form { display: flex; flex-direction: column; gap: 10px; }
+.pane hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.pane code { background: var(--soft); padding: 2px 10px; border-radius: 8px; font-weight: 700; }
+.pane .err { margin: 0; color: #d1495b; }
+.pane .ok { margin: 0; color: #3d9a73; }
+.pane .warn { color: #c98a1b; }
+.row2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }

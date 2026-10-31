@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, type AdminUser, type LogRow, type Usage, type User } from "$lib/api";
+  import {
+    api,
+    type AdminUser,
+    type LogRow,
+    type StorageInfo,
+    type Usage,
+    type User,
+  } from "$lib/api";
   import Avatar from "$lib/Avatar.svelte";
 
   type Tab = "people" | "logs" | "usage";
@@ -11,26 +18,15 @@
   let list = $state<AdminUser[]>([]);
   let rows = $state<LogRow[]>([]);
   let usage = $state<Usage | null>(null);
+  let storage = $state<StorageInfo | null>(null);
   let error = $state("");
   let confirmId = $state<string | null>(null);
+  let delId = $state<string | null>(null);
+  let confirmLogs = $state(false);
   let resetInfo = $state<{ name: string; code: string; expiresAt: number } | null>(null);
   let timer: number | undefined;
-  let delId = $state<string | null>(null);
   let delTimer: number | undefined;
-
-  function removeUser(u: AdminUser) {
-    if (delId !== u.id) {
-      delId = u.id;
-      clearTimeout(delTimer);
-      delTimer = window.setTimeout(() => (delId = null), 4000);
-      return;
-    }
-    delId = null;
-    guard(async () => {
-      await api(`/api/users/${u.id}`, { method: "DELETE" });
-      await loadPeople();
-    });
-  }
+  let logTimer: number | undefined;
 
   const roleLabel = (r?: string) => (r === "owner" ? "Kurucu" : r === "admin" ? "Yönetici" : "Üye");
   const ACTIONS: Record<string, string> = {
@@ -51,6 +47,13 @@
     message_delete: "mesaj sildi",
     message_edit: "mesajı düzenledi",
     user_delete: "hesap sildi",
+    session_revoke: "bir oturumu sonlandırdı",
+    logout_all: "tüm cihazlardan çıkış yaptı",
+    logout_others: "diğer cihazlardan çıkış yaptı",
+    emoji_add: "özel emoji ekledi",
+    emoji_delete: "özel emoji sildi",
+    chat_clear: "sohbeti temizledi",
+    logs_clear: "günlüğü temizledi",
   };
   const when = (t: number) =>
     new Date(t).toLocaleString("tr-TR", {
@@ -60,6 +63,7 @@
       minute: "2-digit",
     });
   const hours = (m: number) => (m / 60).toFixed(1);
+  const mb = (b: number) => (b / 1024 / 1024).toFixed(1);
   const pct = $derived(
     usage ? Math.min(100, Math.round((usage.totalMinutes / usage.limit) * 100)) : 0,
   );
@@ -84,6 +88,7 @@
   const loadUsage = () =>
     guard(async () => {
       usage = await api<Usage>("/api/usage");
+      storage = await api<StorageInfo>("/api/storage");
     });
 
   function show(t: Tab) {
@@ -122,6 +127,34 @@
     guard(async () => {
       await api(`/api/users/${u.id}/ban`, { method: "POST", body: { banned: true } });
       await loadPeople();
+    });
+  }
+
+  function removeUser(u: AdminUser) {
+    if (delId !== u.id) {
+      delId = u.id;
+      clearTimeout(delTimer);
+      delTimer = window.setTimeout(() => (delId = null), 4000);
+      return;
+    }
+    delId = null;
+    guard(async () => {
+      await api(`/api/users/${u.id}`, { method: "DELETE" });
+      await loadPeople();
+    });
+  }
+
+  function clearLogs() {
+    if (!confirmLogs) {
+      confirmLogs = true;
+      clearTimeout(logTimer);
+      logTimer = window.setTimeout(() => (confirmLogs = false), 4000);
+      return;
+    }
+    confirmLogs = false;
+    guard(async () => {
+      await api("/api/logs", { method: "DELETE" });
+      await loadLogs();
     });
   }
 
@@ -174,7 +207,7 @@
                 <button onclick={() => setRole(u, "admin")}>Yönetici yap</button>
               {/if}
             {/if}
-                        {#if canManage(u)}
+            {#if canManage(u)}
               <button onclick={() => resetCode(u)}>Şifre kodu</button>
               {#if u.banned}
                 <button onclick={() => unban(u)}>Engeli kaldır</button>
@@ -194,6 +227,14 @@
       {/each}
     </section>
   {:else if tab === "logs"}
+    <div class="logbar">
+      <small class="muted">Son 200 olay. 90 günden eski kayıtlar otomatik silinir. Mesaj içerikleri kaydedilmez.</small>
+      {#if user.role === "owner"}
+        <button class="danger" onclick={clearLogs}>
+          {confirmLogs ? "Tüm günlük silinsin mi?" : "🧹 Günlüğü temizle"}
+        </button>
+      {/if}
+    </div>
     <section class="card list">
       {#each rows as r (r.id)}
         <div class="row log">
@@ -207,7 +248,6 @@
         <p class="muted">Henüz kayıt yok.</p>
       {/each}
     </section>
-    <small class="muted">Son 200 olay. 90 günden eski kayıtlar otomatik silinir. Mesaj içerikleri kaydedilmez.</small>
   {:else if usage}
     <section class="card list usage">
       <h2>Sesli oda kullanımı (tahmini)</h2>
@@ -237,6 +277,17 @@
         Limit için <code>VOICE_MONTHLY_LIMIT=5000</code>.
       </small>
     </section>
+
+    {#if storage}
+      <section class="card list usage">
+        <h2>Resim depolama</h2>
+        <p><b>{storage.count}</b> resim · <b>{mb(storage.bytes)} MB</b></p>
+        <small>
+          Resimler sunucu bilgisayarının <code>apps\server\uploads</code> klasöründe durur ve
+          {storage.ttlDays} gün sonra otomatik silinir. Tek dosya sınırı {storage.maxMb} MB.
+        </small>
+      </section>
+    {/if}
   {:else}
     <p class="muted">Yükleniyor…</p>
   {/if}
@@ -263,6 +314,7 @@
   small, .muted { color: var(--muted); }
   .acts { display: flex; gap: 8px; flex-wrap: wrap; }
   .danger { background: #d1495b; color: #fff; }
+  .logbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
   .usage { display: flex; flex-direction: column; gap: 8px; padding: 16px; }
   .usage p { margin: 0; }
   .meter { height: 14px; border-radius: 999px; background: var(--soft); overflow: hidden; }

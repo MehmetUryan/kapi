@@ -1,17 +1,24 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { emojiUrl } from "$lib/api";
   import { isTauri } from "$lib/env";
 
   type Part = {
-    t: "text" | "bold" | "code" | "block" | "link" | "mention";
+    t: "text" | "bold" | "code" | "block" | "link" | "mention" | "emoji";
     v: string;
     me?: boolean;
+    id?: string;
   };
 
-  let { text, names, me }: { text: string; names: Set<string>; me: string } = $props();
+  let {
+    text,
+    names,
+    me,
+    emojis,
+  }: { text: string; names: Set<string>; me: string; emojis: Map<string, string> } = $props();
 
   const RE =
-    /```([\s\S]+?)```|`([^`\n]+)`|\*\*([^*\n]+?)\*\*|(https?:\/\/[^\s<]+)|(?<!\w)@(\w{3,20})/g;
+    /```([\s\S]+?)```|`([^`\n]+)`|\*\*([^*\n]+?)\*\*|(https?:\/\/[^\s<]+)|(?<!\w)@(\w{3,20})|:([a-z0-9_]{2,20}):/gi;
 
   function parse(src: string): Part[] {
     const out: Part[] = [];
@@ -36,6 +43,10 @@
         } else {
           out.push({ t: "text", v: `@${name}` });
         }
+      } else if (m[6] !== undefined) {
+        const id = emojis.get(m[6].toLowerCase());
+        if (id) out.push({ t: "emoji", v: m[6].toLowerCase(), id });
+        else out.push({ t: "text", v: m[0] });
       }
       last = i + m[0].length;
     }
@@ -62,6 +73,7 @@
   {:else if p.t === "code"}<code class="ic">{p.v}</code>
   {:else if p.t === "block"}<pre class="blk">{p.v}</pre>
   {:else if p.t === "link"}<a href={p.v} onclick={(e) => open(e, p.v)}>{p.v}</a>
+  {:else if p.t === "emoji"}<img class="ce" src={emojiUrl(p.id ?? "")} alt=":{p.v}:" title=":{p.v}:" />
   {:else}<span class="men" class:me={p.me}>{p.v}</span>
   {/if}
 {/each}
@@ -77,4 +89,5 @@
   .blk { display: block; margin: 4px 0; padding: 8px 10px; white-space: pre-wrap; font-size: 0.85em; }
   .men { font-weight: 700; background: color-mix(in srgb, currentColor 14%, transparent); border-radius: 6px; padding: 0 4px; }
   .men.me { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+  .ce { height: 1.4em; width: auto; vertical-align: -0.3em; }
 </style>

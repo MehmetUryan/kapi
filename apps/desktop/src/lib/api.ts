@@ -1,3 +1,4 @@
+import { isTauri } from "./env";
 export type Role = "owner" | "admin" | "member";
 export type User = { id: string; username: string; avatarAt: number | null; role?: Role };
 export type AdminUser = User & { banned: boolean; createdAt: number };
@@ -22,6 +23,7 @@ export type Room = {
   locked?: boolean;
   access?: boolean;
   canDelete?: boolean;
+  canClear?: boolean;
   kind?: "room" | "dm";
   peer?: Friend;
 };
@@ -35,6 +37,7 @@ export type Msg = {
   createdAt: number;
   editedAt?: number | null;
   reactions?: { emoji: string; users: string[] }[];
+  attachment?: Attachment | null;
   replyTo?: string | null;
   reply?: { id: string; username: string; text: string } | null;
   mentions?: string[];
@@ -67,6 +70,7 @@ export async function api<T>(
   opts: { method?: string; body?: unknown } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {};
+  headers["X-Kapi-Client"] = isTauri() ? "app" : "web";
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -97,3 +101,52 @@ export type Dm = {
   lastAt: number;
   lastMine: boolean;
 };
+export type SessionInfo = {
+  id: string;
+  device: string;
+  createdAt: number;
+  lastSeen: number;
+  current: boolean;
+  online: boolean;
+};
+
+export type Attachment = {
+  id: string;
+  mime: string;
+  size: number;
+  w: number | null;
+  h: number | null;
+  expired: boolean;
+};
+export type CustomEmoji = { id: string; name: string; createdBy: string; creator: string | null };
+export type StorageInfo = { count: number; bytes: number; ttlDays: number; maxMb: number };
+
+export const emojiUrl = (id: string) => `${getServer()}/api/emojis/${id}/image`;
+
+export async function uploadImage(
+  roomId: string,
+  blob: Blob,
+  opts: { text?: string; replyTo?: string | null; w: number; h: number },
+) {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${getToken()}`,
+    "Content-Type": blob.type,
+    "X-Kapi-W": String(opts.w),
+    "X-Kapi-H": String(opts.h),
+    "X-Kapi-Client": isTauri() ? "app" : "web",
+  };
+  if (opts.text) headers["X-Kapi-Text"] = encodeURIComponent(opts.text.slice(0, 500));
+  if (opts.replyTo) headers["X-Kapi-Reply"] = opts.replyTo;
+  let res: Response;
+  try {
+    res = await fetch(`${getServer()}/api/rooms/${roomId}/images`, {
+      method: "POST",
+      headers,
+      body: blob,
+    });
+  } catch {
+    throw new Error("Sunucuya ulaşılamıyor");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? "Yükleme başarısız");
+}

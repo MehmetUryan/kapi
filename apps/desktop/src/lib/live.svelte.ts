@@ -22,6 +22,8 @@ class Live {
   authLost = $state(false);
   connected = $state(false);
   deletedRoomId = $state<string | null>(null);
+  notice = $state<string | null>(null);
+  emojisVersion = $state(0);
 
   currentRoom: string | null = null;
   private me = "";
@@ -82,11 +84,20 @@ class Live {
       else if (data.type === "rooms") this.roomsVersion++;
       else if (data.type === "friends") this.friendsVersion++;
       else if (data.type === "dms") this.dmsVersion++;
+      else if (data.type === "emojis") this.emojisVersion++;
+      else if (data.type === "room-cleared") {
+        if (data.roomId === this.currentRoom) {
+          this.messages = [];
+          this.hasMore = false;
+          this.notice = `🧹 ${data.by} sohbeti temizledi`;
+        }
+      }
       else if (data.type === "me") this.meVersion++;
       else if (data.type === "room-deleted") this.deletedRoomId = data.roomId;
       else if (data.type === "message" && data.message.roomId === this.currentRoom) {
         const m: Msg = data.message;
         this.messages = [...this.messages, m];
+        this.notice = null;
         this.typers = this.typers.filter((t) => t.id !== m.userId);
         const mentioned = !!m.mentions?.includes(this.me);
         if (

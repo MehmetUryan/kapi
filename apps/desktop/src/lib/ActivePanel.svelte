@@ -1,16 +1,23 @@
 <script lang="ts">
-  import type { Person, Room } from "$lib/api";
+  import type { Person, Room, User } from "$lib/api";
   import { live } from "$lib/live.svelte";
   import { social, statusLabel } from "$lib/social.svelte";
   import Avatar from "$lib/Avatar.svelte";
   import Dot from "$lib/Dot.svelte";
 
-  let { meId, onopen }: { meId: string; onopen: (r: Room) => void } = $props();
+  let { me, onopen }: { me: User; onopen: (r: Room) => void } = $props();
 
   let error = $state("");
   let busyId = $state<string | null>(null);
 
-  const others = $derived(live.people.filter((p) => p.id !== meId));
+  const self = $derived<Person>({
+    id: me.id,
+    username: me.username,
+    avatarAt: me.avatarAt,
+    status: live.myStatus,
+    playing: live.playing,
+  });
+  const others = $derived(live.people.filter((p) => p.id !== me.id));
   const friendIds = $derived(new Set(social.friends.friends.map((f) => f.id)));
   const outIds = $derived(new Set(social.friends.outgoing.map((f) => f.id)));
   const inIds = $derived(new Set(social.friends.incoming.map((f) => f.id)));
@@ -38,27 +45,29 @@
   const accept = (p: Person) => run(p.id, () => social.accept(p.id));
 </script>
 
-{#snippet row(p: Person)}
+{#snippet row(p: Person, isSelf: boolean)}
   <div class="row">
     <span class="av">
       <Avatar name={p.username} id={p.id} v={p.avatarAt} size={34} />
       <Dot status={p.status} />
     </span>
     <div class="who">
-      <b>{p.username}</b>
+      <b>{p.username}{isSelf ? " (sen)" : ""}</b>
       <small>{p.playing ? `🎮 ${p.playing}` : statusLabel(p.status)}</small>
     </div>
-    <div class="acts">
-      {#if friendIds.has(p.id)}
-        <button title="Mesaj gönder" disabled={busyId === p.id} onclick={() => dm(p)}>💬</button>
-      {:else if inIds.has(p.id)}
-        <button title="Arkadaşlık isteğini kabul et" disabled={busyId === p.id} onclick={() => accept(p)}>✓</button>
-      {:else if outIds.has(p.id)}
-        <span title="İstek gönderildi">⏳</span>
-      {:else}
-        <button title="Arkadaş ekle" disabled={busyId === p.id} onclick={() => add(p)}>➕</button>
-      {/if}
-    </div>
+    {#if !isSelf}
+      <div class="acts">
+        {#if friendIds.has(p.id)}
+          <button title="Mesaj gönder" disabled={busyId === p.id} onclick={() => dm(p)}>💬</button>
+        {:else if inIds.has(p.id)}
+          <button title="Arkadaşlık isteğini kabul et" disabled={busyId === p.id} onclick={() => accept(p)}>✓</button>
+        {:else if outIds.has(p.id)}
+          <span title="İstek gönderildi">⏳</span>
+        {:else}
+          <button title="Arkadaş ekle" disabled={busyId === p.id} onclick={() => add(p)}>➕</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 {/snippet}
 
@@ -67,18 +76,26 @@
   {#if error}<small class="err">{error}</small>{/if}
 
   <div class="grp">
+    {@render row(self, true)}
+  </div>
+
+  <div class="grp">
     <small class="gh">Arkadaşlar · {onlineFriends.length}</small>
-    {#each onlineFriends as p (p.id)}{@render row(p)}{:else}
+    {#each onlineFriends as p (p.id)}{@render row(p, false)}{:else}
       <p class="muted">Çevrimiçi arkadaşın yok.</p>
     {/each}
   </div>
 
   <div class="grp">
     <small class="gh">Sunucuda · {onlineOthers.length}</small>
-    {#each onlineOthers as p (p.id)}{@render row(p)}{:else}
+    {#each onlineOthers as p (p.id)}{@render row(p, false)}{:else}
       <p class="muted">Başka kimse çevrimiçi değil.</p>
     {/each}
   </div>
+
+  <small class="diag">
+    {live.connected ? "🟢 Sunucuya bağlı" : "🔴 Bağlantı yok"} · çevrimiçi: {live.people.length}
+  </small>
 </aside>
 
 <style>
@@ -103,5 +120,6 @@
   .acts button { padding: 0.25rem 0.6rem; background: transparent; }
   .acts button:hover { background: var(--soft); transform: none; }
   .muted { margin: 0; color: var(--muted); font-size: 0.85rem; }
+  .diag { color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--line); padding-top: 8px; }
   .err { color: #d1495b; }
 </style>

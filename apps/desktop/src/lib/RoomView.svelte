@@ -1,16 +1,21 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { Track } from "livekit-client";
-  import { api, type Msg, type Room, type User } from "$lib/api";
+  import { api, emojiUrl, uploadImage, type Msg, type Room, type User } from "$lib/api";
+  import { emojis } from "$lib/emojis.svelte";
   import { isTauri } from "$lib/env";
+  import { prepareImage } from "$lib/imageTools";
   import { live } from "$lib/live.svelte";
   import { prefs, type ShareQuality } from "$lib/prefs.svelte";
   import { voice } from "$lib/voice.svelte";
   import Avatar from "$lib/Avatar.svelte";
+  import AuthImage from "$lib/AuthImage.svelte";
   import RichText from "$lib/RichText.svelte";
   import Toggle from "$lib/Toggle.svelte";
 
   let { room, user, onback }: { room: Room; user: User; onback: () => void } = $props();
+
+  type Pending = { blob: Blob; w: number; h: number; url: string; name: string };
 
   const EMOJIS = [
     "😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎",
@@ -34,7 +39,9 @@
   let list = $state<HTMLDivElement>();
   let inner = $state<HTMLDivElement>();
   let inputEl = $state<HTMLTextAreaElement>();
+  let fileInput = $state<HTMLInputElement>();
   let emojiOpen = $state(false);
+  let emojiTab = $state<"std" | "custom">("std");
   let rxFor = $state<string | null>(null);
   let volFor = $state<string | null>(null);
   let shareOpen = $state(false);
@@ -51,9 +58,15 @@
   let results = $state<Msg[] | null>(null);
   let searchBusy = $state(false);
   let searchError = $state("");
+  let pending = $state<Pending | null>(null);
+  let uploading = $state(false);
+  let dragging = $state(false);
+  let lightbox = $state<string | null>(null);
+  let confirmClear = $state(false);
   let stick = true;
 
   const staff = $derived(user.role === "owner" || user.role === "admin");
+  const canClear = $derived(room.kind !== "dm" && !!room.canClear);
 
   const voiceMembers = $derived(live.voice[room.id] ?? []);
   const chatMembers = $derived(live.presence[room.id] ?? []);
@@ -82,14 +95,16 @@
     const id = room.id;
     untrack(() => {
       stick = true;
+      live.notice = null;
       live.enter(id);
     });
     return () => {
       live.leave();
+      clearPending();
     };
   });
 
-  // içerik büyüyünce (mesaj, tepki, düzenleme) alttaysan altta kal
+  // içerik büyüyünce (mesaj, tepki, düzenleme, resim) alttaysan altta kal
   $effect(() => {
     const sc = list;
     const el = inner;
@@ -107,7 +122,6 @@
     stick = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
   }
 
-  // yazı kutusu içeriğe göre büyüsün
   function autosize() {
     const el = inputEl;
     if (!el) return;
@@ -130,14 +144,109 @@
     };
   }
 
-  function submit() {
-    if (!text.trim()) return;
+  // ---- resim gönderme ----
+  function clearPending() {
+    if (pending) URL.revokeObjectURL(pending.url);
+    pending = null;
+  }
+
+  async function setPending(file: File) {
+    msgError = "";
+    try {
+      const p = await prepareImage(file);
+      clearPending();
+      pending = { ...p, url: URL.createObjectURL(p.blob), name: file.name || "resim" };
+      inputEl?.focus();
+    } catch (err) {
+      msgError = err instanceof Error ? err.message : "Resim hazırlanamadı";
+    }
+  }
+
+  function pickFile(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (file) void setPending(file);
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+    if (!files.length) return;
+    e.preventDefault();
+    void setPending(files[0]);
+  }
+
+  const hasFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+
+  function onDragOver(e: DragEvent) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragging = true;
+  }
+
+  function onDrop(e: DragEvent) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragging = false;
+    const f = [...(e.dataTransfer?.files ?? [])].find((x) => x.type.startsWith("image/"));
+    if (f) void setPending(f);
+    else msgError = "Sadece resim dosyaları gönderilebilir.";
+  }
+
+  async function sendImage() {
+    if (!pending || uploading) return;
+    uploading = true;
+    msgError = "";
+    try {
+      await uploadImage(room.id, pending.blob, {
+        text: text.trim(),
+        replyTo: replyTo?.id ?? null,
+        w: pending.w,
+        h: pending.h,
+      });
+      stick = true;
+      clearPending();
+      text = "";
+      replyTo = null;
+    } catch (err) {
+      msgError = err instanceof Error ? err.message : "Resim gönderilemedi";
+    } finally {
+      uploading = false;
+    }
+  }
+
+  // ---- mesaj gönderme ----
+  async function submit() {
+    if (pending) {
+      await sendImage();
+      return;
+    }
+    const t = text.trim();
+    if (!t) return;
+    if (t.toLowerCase() === "/temizle") {
+      text = "";
+      sugQuery = null;
+      if (room.kind === "dm") msgError = "Bu komut özel mesajlarda kullanılamaz.";
+      else if (canClear) confirmClear = true;
+      else msgError = "Bu komutu sadece odayı kuran kişi ve yöneticiler kullanabilir.";
+      return;
+    }
     stick = true;
     live.say(text, replyTo?.id ?? null);
     text = "";
     replyTo = null;
     emojiOpen = false;
     sugQuery = null;
+  }
+
+  async function doClear() {
+    confirmClear = false;
+    msgError = "";
+    try {
+      await api(`/api/rooms/${room.id}/clear`, { method: "POST", body: {} });
+    } catch (err) {
+      msgError = err instanceof Error ? err.message : "Temizlenemedi";
+    }
   }
 
   function onInput(e: Event) {
@@ -188,7 +297,7 @@
     }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      submit();
+      void submit();
     }
   }
 
@@ -313,6 +422,7 @@
       hour: "2-digit",
       minute: "2-digit",
     });
+  const kb = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`);
 </script>
 
 <svelte:window
@@ -321,6 +431,8 @@
       emojiOpen = false;
       rxFor = null;
       shareOpen = false;
+      lightbox = null;
+      confirmClear = false;
     }
   }}
   onclick={(e) => {
@@ -512,7 +624,14 @@
     </div>
   </section>
 
-  <section class="chat card">
+  <section
+    class="chat card"
+    ondragover={onDragOver}
+    ondragleave={() => (dragging = false)}
+    ondrop={onDrop}
+  >
+    {#if dragging}<div class="dropzone">📷 Resmi buraya bırak</div>{/if}
+
     <div class="who" title="Bu odanın sohbetini açık tutanlar">
       <span>💬 Sohbette:</span>
       {#each chatMembers as p (p.id)}
@@ -522,12 +641,17 @@
       {:else}
         <span>—</span>
       {/each}
-      <button
-        type="button"
-        class="searchbtn"
-        title="Bu odada ara"
-        onclick={() => (searching ? closeSearch() : (searching = true))}
-      >🔍</button>
+      <span class="tail">
+        {#if canClear}
+          <button type="button" class="searchbtn" title="Sohbeti temizle (/temizle)" onclick={() => (confirmClear = true)}>🧹</button>
+        {/if}
+        <button
+          type="button"
+          class="searchbtn"
+          title="Bu odada ara"
+          onclick={() => (searching ? closeSearch() : (searching = true))}
+        >🔍</button>
+      </span>
     </div>
 
     {#if searching}
@@ -575,6 +699,9 @@
                     {#if m.reply}<b>{m.reply.username}</b><span>{m.reply.text}</span>{:else}<i>Silinmiş mesaj</i>{/if}
                   </div>
                 {/if}
+                {#if m.attachment}
+                  <AuthImage att={m.attachment} onopen={(u) => (lightbox = u)} />
+                {/if}
                 {#if editingId === m.id}
                   <form class="edit" onsubmit={(e) => saveEdit(e, m)}>
                     <input
@@ -587,8 +714,8 @@
                       <button type="button" onclick={cancelEdit}>Vazgeç</button>
                     </div>
                   </form>
-                {:else}
-                  <span class="txt"><RichText text={m.text} {names} me={user.username} /></span>
+                {:else if m.text}
+                  <span class="txt"><RichText text={m.text} {names} me={user.username} emojis={emojis.byName} /></span>
                 {/if}
                 <small>{time(m.createdAt)}{m.editedAt ? " · düzenlendi" : ""}</small>
                 {#if m.reactions?.length}
@@ -619,7 +746,7 @@
                         inputEl?.focus();
                       }}
                     >↩</button>
-                    {#if mine}<button title="Düzenle" onclick={() => startEdit(m)}>✎</button>{/if}
+                    {#if mine && !m.attachment}<button title="Düzenle" onclick={() => startEdit(m)}>✎</button>{/if}
                     {#if mine || staff}
                       <button title="Sil" onclick={() => removeMsg(m)}>
                         {delId === m.id ? "Silinsin mi?" : "✕"}
@@ -634,12 +761,35 @@
       </div>
     {/if}
 
+    {#if live.notice && !searching}<small class="notice">{live.notice}</small>{/if}
     {#if !searching}<small class="typing">{typingText || "\u00a0"}</small>{/if}
     {#if msgError}<small class="err">{msgError}</small>{/if}
+
+    {#if confirmClear}
+      <div class="warnbar">
+        <span>🧹 Bu odadaki <b>tüm mesajlar ve resimler</b> kalıcı olarak silinecek. Emin misin?</span>
+        <span class="btns">
+          <button type="button" class="danger" onclick={doClear}>Evet, temizle</button>
+          <button type="button" onclick={() => (confirmClear = false)}>Vazgeç</button>
+        </span>
+      </div>
+    {/if}
+
     {#if replyTo}
       <div class="replybar">
-        <span>↩ <b>{replyTo.username}</b>: {replyTo.text.slice(0, 80)}</span>
+        <span>↩ <b>{replyTo.username}</b>: {(replyTo.text || (replyTo.attachment ? "📷 Resim" : "")).slice(0, 80)}</span>
         <button type="button" class="x" onclick={() => (replyTo = null)}>✕</button>
+      </div>
+    {/if}
+
+    {#if pending}
+      <div class="pendbar">
+        <img src={pending.url} alt="Önizleme" />
+        <div class="pinfo">
+          <b>{pending.name}</b>
+          <small>{kb(pending.blob.size)} · {pending.w}×{pending.h} · göndermek için Enter</small>
+        </div>
+        <button type="button" class="x" title="Kaldır" onclick={clearPending}>✕</button>
       </div>
     {/if}
 
@@ -647,16 +797,36 @@
       class="composer"
       onsubmit={(e) => {
         e.preventDefault();
-        submit();
+        void submit();
       }}
     >
+      <button type="button" class="emoji-btn" title="Resim ekle" onclick={() => fileInput?.click()}>📎</button>
+      <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onchange={pickFile} />
       <div class="emoji-wrap">
         <button type="button" class="emoji-btn" title="Emoji" onclick={() => (emojiOpen = !emojiOpen)}>😊</button>
         {#if emojiOpen}
           <div class="emoji-pop card">
-            {#each EMOJIS as em}
-              <button type="button" onclick={() => addEmoji(em)}>{em}</button>
-            {/each}
+            <div class="etabs">
+              <button type="button" class:on={emojiTab === "std"} onclick={() => (emojiTab = "std")}>Emoji</button>
+              <button type="button" class:on={emojiTab === "custom"} onclick={() => (emojiTab = "custom")}>Özel · {emojis.list.length}</button>
+            </div>
+            {#if emojiTab === "std"}
+              <div class="egrid">
+                {#each EMOJIS as em}
+                  <button type="button" onclick={() => addEmoji(em)}>{em}</button>
+                {/each}
+              </div>
+            {:else}
+              <div class="egrid">
+                {#each emojis.list as e (e.id)}
+                  <button type="button" title=":{e.name}:" onclick={() => addEmoji(`:${e.name}:`)}>
+                    <img class="cemoji" src={emojiUrl(e.id)} alt=":{e.name}:" />
+                  </button>
+                {:else}
+                  <small class="muted span">Henüz özel emoji yok. Ayarlar → Emoji'den ekleyebilirsin.</small>
+                {/each}
+              </div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -667,7 +837,10 @@
           rows="1"
           oninput={onInput}
           onkeydown={onComposerKey}
-          placeholder="Bir şey yaz…  (Enter: gönder · Shift+Enter: yeni satır · @ ile an)"
+          onpaste={onPaste}
+          placeholder={pending
+            ? "Resme açıklama ekle (isteğe bağlı)…"
+            : "Bir şey yaz…  (Enter: gönder · Shift+Enter: yeni satır · Ctrl+V: resim)"}
           maxlength="2000"
         ></textarea>
         {#if suggestions.length}
@@ -690,10 +863,16 @@
           </ul>
         {/if}
       </div>
-      <button class="primary send">Gönder</button>
+      <button class="primary send" disabled={uploading}>{uploading ? "Yükleniyor…" : "Gönder"}</button>
     </form>
   </section>
 </div>
+
+{#if lightbox}
+  <button type="button" class="lb" onclick={() => (lightbox = null)} aria-label="Kapat">
+    <img src={lightbox} alt="Resim" />
+  </button>
+{/if}
 
 <style>
   .page { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; gap: 14px; padding: 18px; }
@@ -799,10 +978,11 @@
   .err { color: #d1495b; font-size: 0.85rem; }
   .vmeta .err { color: #d1495b; }
 
-  .chat { flex: none; height: 44%; min-height: 260px; display: flex; flex-direction: column; padding: 12px; gap: 6px; overflow: hidden; }
+  .chat { position: relative; flex: none; height: 44%; min-height: 260px; display: flex; flex-direction: column; padding: 12px; gap: 6px; overflow: hidden; }
   .who { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--muted); flex-wrap: wrap; flex: none; }
   .mini { display: inline-flex; }
-  .searchbtn { margin-left: auto; padding: 0.2rem 0.6rem; background: transparent; }
+  .tail { margin-left: auto; display: inline-flex; gap: 2px; }
+  .searchbtn { padding: 0.2rem 0.6rem; background: transparent; }
   .list { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; scrollbar-gutter: stable; }
   .inner { display: flex; flex-direction: column; gap: 8px; padding-bottom: 16px; min-width: 0; }
   .older { align-self: center; padding: 0.3rem 1rem; font-size: 0.8rem; }
@@ -867,10 +1047,32 @@
   .edit-actions { display: flex; gap: 6px; }
   .edit button { background: var(--surface); color: var(--ink); font-size: 0.8rem; padding: 0.25rem 0.7rem; }
 
+  .notice { flex: none; color: var(--muted); font-size: 0.8rem; text-align: center; }
   .typing { flex: none; color: var(--muted); font-size: 0.8rem; height: 16px; line-height: 16px; overflow: hidden; }
-  .replybar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; border-radius: 12px; background: var(--soft); font-size: 0.85rem; }
+  .replybar, .warnbar, .pendbar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; border-radius: 12px; background: var(--soft); font-size: 0.85rem; }
   .replybar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .replybar .x { padding: 0 0.5rem; background: transparent; }
+  .warnbar { flex-wrap: wrap; border: 1.5px solid #d1495b; }
+  .warnbar .btns { display: flex; gap: 6px; }
+  .warnbar .danger { background: #d1495b; color: #fff; }
+  .pendbar { justify-content: flex-start; }
+  .pendbar img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; flex: none; }
+  .pinfo { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .pinfo b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pinfo small { color: var(--muted); }
+  .x { padding: 0 0.5rem; background: transparent; }
+
+  .dropzone {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+    border: 2px dashed var(--accent);
+    font-weight: 600;
+    pointer-events: none;
+  }
 
   .searchpane { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
   .srow { display: flex; gap: 8px; }
@@ -894,13 +1096,33 @@
     bottom: calc(100% + 8px);
     left: 0;
     z-index: 30;
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 2px;
     padding: 8px;
-    width: 320px;
+    width: 330px;
     max-width: 80vw;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
-  .emoji-pop button { background: transparent; font-size: 1.25rem; padding: 0.25rem; border-radius: 8px; }
-  .emoji-pop button:hover { background: var(--soft); transform: none; }
+  .etabs { display: flex; gap: 6px; }
+  .etabs button { flex: 1; padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+  .etabs button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .egrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; max-height: 220px; overflow-y: auto; }
+  .egrid button { background: transparent; font-size: 1.25rem; padding: 0.25rem; border-radius: 8px; }
+  .egrid button:hover { background: var(--soft); transform: none; }
+  .egrid .span { grid-column: 1 / -1; padding: 8px; }
+  .cemoji { width: 1.6rem; height: 1.6rem; object-fit: contain; vertical-align: middle; }
+
+  .lb {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.82);
+    cursor: zoom-out;
+  }
+  .lb:hover { transform: none; }
+  .lb img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
 </style>
