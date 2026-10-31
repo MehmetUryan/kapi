@@ -33,6 +33,15 @@
     if (voice.room?.id === id) voice.leave();
   });
 
+    // odaya erişimin kaldırıldıysa odadan çık
+  $effect(() => {
+    const id = live.kickedRoomId;
+    if (!id) return;
+    if (room?.id === id) room = null;
+    if (voice.room?.id === id) voice.leave();
+    live.kickedRoomId = null;
+  });
+
     // özel emojiler: girişte ve değişince yükle
   $effect(() => {
     live.emojisVersion;
@@ -87,6 +96,7 @@
   }
 
   function logout() {
+    void api("/api/logout", { method: "POST", body: {} }).catch(() => {});
     voice.leave();
     social.stop();
     emojis.clear();

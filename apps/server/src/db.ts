@@ -28,6 +28,7 @@ export const invites = sqliteTable("invites", {
   createdBy: text("created_by"),
   usedBy: text("used_by"),
   expiresAt: integer("expires_at"),
+  createdAt: integer("created_at"),
 });
 
 export const rooms = sqliteTable("rooms", {
@@ -38,7 +39,10 @@ export const rooms = sqliteTable("rooms", {
   passwordHash: text("password_hash"),
   kind: text("kind").notNull().default("room"),
   dmA: text("dm_a"),
-  dmB: text("dm_b"), 
+  dmB: text("dm_b"),
+  visibility: text("visibility").notNull().default("all"),
+  color: text("color"),
+  position: integer("position"),
 });
 
 export const roomMembers = sqliteTable("room_members", {
@@ -243,6 +247,11 @@ export const customEmojis = sqliteTable("custom_emojis", {
   image: text("image").notNull(),
 });
 
+export const roomVisibility = sqliteTable("room_visibility", {
+  roomId: text("room_id").notNull(),
+  userId: text("user_id").notNull(),
+});
+
 const sesCols = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
 if (!sesCols.some((c) => c.name === "id")) {
   sqlite.exec("ALTER TABLE sessions ADD COLUMN id TEXT");
@@ -278,6 +287,27 @@ sqlite.exec(`
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     image TEXT NOT NULL
+  );
+`);
+
+const roomCols3 = sqlite.prepare("PRAGMA table_info(rooms)").all() as { name: string }[];
+if (!roomCols3.some((c) => c.name === "visibility")) {
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN visibility TEXT NOT NULL DEFAULT 'all'");
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN color TEXT");
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN position INTEGER");
+}
+sqlite.exec(
+  "UPDATE rooms SET position = (SELECT COUNT(*) FROM rooms r2 WHERE r2.kind = 'room' AND r2.created_at < rooms.created_at) WHERE kind = 'room' AND position IS NULL",
+);
+const invCols2 = sqlite.prepare("PRAGMA table_info(invites)").all() as { name: string }[];
+if (!invCols2.some((c) => c.name === "created_at")) {
+  sqlite.exec("ALTER TABLE invites ADD COLUMN created_at INTEGER");
+}
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS room_visibility (
+    room_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    PRIMARY KEY (room_id, user_id)
   );
 `);
 

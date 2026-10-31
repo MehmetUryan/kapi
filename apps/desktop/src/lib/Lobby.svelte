@@ -9,7 +9,9 @@
   import DmTab from "$lib/DmTab.svelte";
   import Dot from "$lib/Dot.svelte";
   import FriendsTab from "$lib/FriendsTab.svelte";
+  import InviteDialog from "$lib/InviteDialog.svelte";
   import PasswordInput from "$lib/PasswordInput.svelte";
+  import RoomDialog from "$lib/RoomDialog.svelte";
   import Select from "$lib/Select.svelte";
 
   let { user, onopen, onprofile, onadmin, onlogout }: {
@@ -28,39 +30,24 @@
     { value: "away", label: "🟡 Dışarıda" },
     { value: "invisible", label: "⚫ Görünmez" },
   ];
-  const INVITE_OPTS = [
-    { value: "1", label: "1 saat" },
-    { value: "24", label: "1 gün" },
-    { value: "168", label: "7 gün" },
-    { value: "0", label: "Süresiz" },
-  ];
 
   const staff = $derived(user.role === "owner" || user.role === "admin");
 
   let tab = $state<Tab>("rooms");
   let rooms = $state<Room[]>([]);
-  let newName = $state("");
-  let newPrivate = $state(false);
-  let newPw = $state("");
-  let inviteHours = $state("24");
-  let invite = $state<{ code: string; expiresAt: number | null } | null>(null);
+  let dialog = $state<"invite" | "room" | null>(null);
+  let editing = $state<Room | null>(null);
   let error = $state("");
   let confirmId = $state<string | null>(null);
   let confirmTimer: number | undefined;
   let unlockId = $state<string | null>(null);
   let unlockPw = $state("");
   let unlockErr = $state("");
+  let dragId = $state<string | null>(null);
 
   const dmUnread = $derived(social.dms.reduce((n, d) => n + (live.unread[d.id] ?? 0), 0));
   const reqCount = $derived(social.friends.incoming.length);
-
-  const fmt = (t: number) =>
-    new Date(t).toLocaleString("tr-TR", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+  const canReorder = $derived(rooms.some((r) => r.canReorder));
 
   async function load() {
     rooms = await api<Room[]>("/api/rooms");
@@ -80,44 +67,6 @@
     live.dmsVersion;
     social.loadDms();
   });
-
-  async function createRoom(e: SubmitEvent) {
-    e.preventDefault();
-    error = "";
-    const name = newName.trim();
-    if (!name) return;
-    if (newPrivate && newPw.length < 4) {
-      error = "Oda şifresi en az 4 karakter olmalı.";
-      return;
-    }
-    try {
-      await api("/api/rooms", {
-        method: "POST",
-        body: { name, password: newPrivate ? newPw : undefined },
-      });
-      newName = "";
-      newPw = "";
-      newPrivate = false;
-      await load();
-    } catch (err) {
-      error = err instanceof Error ? err.message : "Oda açılamadı";
-    }
-  }
-
-  async function makeInvite() {
-    error = "";
-    try {
-      const h = Number(inviteHours);
-      const r = await api<{ code: string; expiresAt: number | null }>("/api/invites", {
-        method: "POST",
-        body: { hours: h || null },
-      });
-      invite = r;
-      navigator.clipboard?.writeText(r.code).catch(() => {});
-    } catch (err) {
-      error = err instanceof Error ? err.message : "Kod üretilemedi";
-    }
-  }
 
   function pick(r: Room) {
     error = "";
@@ -159,6 +108,47 @@
       error = e instanceof Error ? e.message : "Silinemedi";
     }
   }
+
+  // ---- sürükleyerek sıralama (yönetici ve kurucu) ----
+  function dragStart(e: DragEvent, r: Room) {
+    if (!r.canReorder) return;
+    dragId = r.id;
+    e.dataTransfer?.setData("text/plain", r.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+
+  function dragOver(e: DragEvent, r: Room) {
+    if (!dragId || dragId === r.id) return;
+    e.preventDefault();
+    const from = rooms.findIndex((x) => x.id === dragId);
+    const to = rooms.findIndex((x) => x.id === r.id);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = [...rooms];
+    const [it] = next.splice(from, 1);
+    next.splice(to, 0, it);
+    rooms = next;
+  }
+
+  async function dragEnd() {
+    if (!dragId) return;
+    dragId = null;
+    try {
+      await api("/api/rooms/order", { method: "PATCH", body: { ids: rooms.map((x) => x.id) } });
+    } catch (e) {
+      error = e instanceof Error ? e.message : "Sıralama kaydedilemedi";
+      await load();
+    }
+  }
+
+  function openNewRoom() {
+    editing = null;
+    dialog = "room";
+  }
+
+  function openEditRoom(r: Room) {
+    editing = r;
+    dialog = "room";
+  }
 </script>
 
 <div class="page">
@@ -182,24 +172,16 @@
       <button onclick={onprofile}>Ayarlar</button>
       {#if staff}
         <button onclick={onadmin}>Yönetim</button>
-        <span class="inv">
-          <Select
-            value={inviteHours}
-            options={INVITE_OPTS}
-            title="Davet kodunun geçerlilik süresi"
-            onchange={(v) => (inviteHours = v)}
-          />
-          <button onclick={makeInvite}>Davet kodu</button>
-        </span>
+        <button onclick={() => (dialog = "invite")}>Davet kodu</button>
       {/if}
       <button onclick={onlogout}>Çıkış</button>
     </div>
   </header>
 
-  {#if invite}
-    <div class="card note">
-      Arkadaşına ver: <code>{invite.code}</code>
-      (tek kullanımlık · {invite.expiresAt ? `${fmt(invite.expiresAt)} tarihine kadar geçerli` : "süresiz"} · panoya kopyalandı)
+  {#if live.lobbyNotice}
+    <div class="card note err">
+      {live.lobbyNotice}
+      <button class="x" onclick={() => (live.lobbyNotice = null)} aria-label="Kapat">✕</button>
     </div>
   {/if}
   {#if error}
@@ -220,12 +202,19 @@
     <div class="main">
       <div class="content">
         {#if tab === "rooms"}
-          <section class="grid">
+          <section class="grid" role="list">
             {#each rooms as r (r.id)}
               {@const talking = live.voice[r.id] ?? []}
               {@const viewing = live.presence[r.id] ?? []}
-              {@const people = talking}
-              <div class="cell">
+              <div
+                class="cell"
+                class:dragging={dragId === r.id}
+                role="listitem"
+                draggable={!!r.canReorder && unlockId !== r.id}
+                ondragstart={(e) => dragStart(e, r)}
+                ondragover={(e) => dragOver(e, r)}
+                ondragend={dragEnd}
+              >
                 {#if unlockId === r.id}
                   <form class="room card" onsubmit={(e) => unlock(e, r)}>
                     <h2>🔒 {r.name}</h2>
@@ -237,13 +226,18 @@
                     </div>
                   </form>
                 {:else}
-                  <button class="room card" onclick={() => pick(r)}>
-                    <h2>{r.locked ? "🔒 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
+                  <button
+                    class="room card"
+                    class:colored={!!r.color}
+                    style={r.color ? `--rc:${r.color}` : ""}
+                    onclick={() => pick(r)}
+                  >
+                    <h2>{r.locked ? "🔒 " : ""}{r.visibility && r.visibility !== "all" ? "👁 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
                     <div class="faces">
-                      {#each people.slice(0, 5) as p (p.id)}
+                      {#each talking.slice(0, 5) as p (p.id)}
                         <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
                       {/each}
-                      {#if people.length > 5}<span class="more">+{people.length - 5}</span>{/if}
+                      {#if talking.length > 5}<span class="more">+{talking.length - 5}</span>{/if}
                     </div>
                     <small>{talking.length || viewing.length ? [talking.length ? `🔊 ${talking.length} seste` : "", viewing.length ? `💬 ${viewing.length} sohbette` : ""].filter(Boolean).join(" · ") : "Şu an boş"}</small>
                   </button>
@@ -251,6 +245,9 @@
                     <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
                       {confirmId === r.id ? "Silinsin mi?" : "✕"}
                     </button>
+                  {/if}
+                  {#if r.canEdit}
+                    <button class="gear" title="Oda ayarları" onclick={() => openEditRoom(r)}>⚙</button>
                   {/if}
                   {#if !r.locked || r.access}
                     <button
@@ -263,24 +260,14 @@
               </div>
             {/each}
 
-            <form class="room card new" onsubmit={createRoom}>
-              <input bind:value={newName} placeholder="Yeni oda adı" maxlength="40" />
-              <div class="seg">
-                <button type="button" class:on={!newPrivate} onclick={() => (newPrivate = false)}>Herkese açık</button>
-                <button type="button" class:on={newPrivate} onclick={() => (newPrivate = true)}>🔒 Şifreli</button>
-              </div>
-              {#if newPrivate}
-                <PasswordInput
-                  bind:value={newPw}
-                  placeholder="Oda şifresi (en az 4)"
-                  maxlength={64}
-                  autocomplete="new-password"
-                />
-                <small>Kurucu her odaya girebilir.</small>
-              {/if}
-              <button class="primary">Oda aç</button>
-            </form>
+            <button class="room card new" onclick={openNewRoom}>
+              <span class="plus">＋</span>
+              <b>Yeni oda</b>
+            </button>
           </section>
+          {#if canReorder}
+            <small class="hint">Odaları sürükleyerek sıralayabilirsin (herkes için geçerli).</small>
+          {/if}
         {:else if tab === "dms"}
           <DmTab {onopen} />
         {:else}
@@ -293,19 +280,25 @@
   </div>
 </div>
 
+{#if dialog === "invite"}
+  <InviteDialog onclose={() => (dialog = null)} />
+{:else if dialog === "room"}
+  <RoomDialog room={editing} me={user} onclose={() => (dialog = null)} ondone={load} />
+{/if}
+
 <style>
   .page { padding: 22px 22px 90px; }
   header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 1.8rem; }
   .right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .inv { display: inline-flex; align-items: center; gap: 6px; }
   .av { position: relative; display: inline-flex; }
   .role { font-size: 0.75rem; background: var(--soft); color: var(--muted); padding: 2px 10px; border-radius: 999px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #c9bfb2; }
   .dot.on { background: #6cc49a; }
-  .note { padding: 12px 16px; margin-bottom: 16px; }
+  .note { padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .note .x { padding: 0.1rem 0.5rem; background: transparent; }
   .err { color: #d1495b; }
-  code { background: var(--soft); padding: 2px 8px; border-radius: 8px; font-weight: 700; }
+  .hint { display: block; margin-top: 12px; color: var(--muted); }
 
   .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
   .tabs button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
@@ -321,8 +314,10 @@
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
   .cell { position: relative; display: flex; }
+  .cell.dragging { opacity: 0.45; }
   .cell .room { flex: 1; }
   .room {
+    position: relative;
     border-radius: var(--radius);
     padding: 18px;
     text-align: left;
@@ -331,6 +326,18 @@
     gap: 14px;
     min-height: 150px;
     justify-content: space-between;
+    overflow: hidden;
+  }
+  .room.colored { background: color-mix(in srgb, var(--rc) 11%, var(--surface)); }
+  .room.colored::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 14px;
+    bottom: 14px;
+    width: 5px;
+    border-radius: 0 6px 6px 0;
+    background: var(--rc);
   }
   .room h2 { margin: 0; font-size: 1.15rem; }
   .faces { display: flex; gap: 6px; align-items: center; min-height: 40px; }
@@ -338,10 +345,8 @@
   small { color: var(--muted); }
   small.err { color: #d1495b; }
   .row { display: flex; gap: 8px; }
-  .new { justify-content: center; border-style: dashed; box-shadow: none; gap: 10px; }
-  .seg { display: flex; gap: 6px; }
-  .seg button { flex: 1; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
-  .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .new { justify-content: center; align-items: center; border-style: dashed; box-shadow: none; gap: 6px; color: var(--muted); }
+  .new .plus { font-size: 2rem; line-height: 1; }
   .unread { background: var(--accent); color: var(--accent-ink); border-radius: 999px; font-size: 0.75rem; padding: 1px 8px; vertical-align: middle; }
   .unread.muted { background: var(--line); color: var(--muted); }
   .del {
@@ -354,6 +359,8 @@
     color: var(--muted);
   }
   .del:hover { color: #d1495b; background: var(--soft); }
+  .gear { position: absolute; bottom: 10px; right: 42px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
+  .gear:hover { opacity: 1; background: var(--soft); transform: none; }
   .bell { position: absolute; bottom: 10px; right: 10px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
   .bell:hover { opacity: 1; background: var(--soft); transform: none; }
 </style>

@@ -56,6 +56,13 @@
 
   const parts = $derived(parse(text));
 
+    // sadece emojiden oluşan kısa mesajlar büyük gösterilir
+  const jumbo = $derived(
+    parts.some((p) => p.t === "emoji") &&
+      parts.filter((p) => p.t === "emoji").length <= 6 &&
+      parts.every((p) => p.t === "emoji" || (p.t === "text" && p.v.trim() === "")),
+  );
+
   async function open(e: MouseEvent, url: string) {
     e.preventDefault();
     try {
@@ -73,7 +80,7 @@
   {:else if p.t === "code"}<code class="ic">{p.v}</code>
   {:else if p.t === "block"}<pre class="blk">{p.v}</pre>
   {:else if p.t === "link"}<a href={p.v} onclick={(e) => open(e, p.v)}>{p.v}</a>
-  {:else if p.t === "emoji"}<img class="ce" src={emojiUrl(p.id ?? "")} alt=":{p.v}:" title=":{p.v}:" />
+  {:else if p.t === "emoji"}<img class="ce" class:big={jumbo} src={emojiUrl(p.id ?? "")} alt=":{p.v}:" title=":{p.v}:" />
   {:else}<span class="men" class:me={p.me}>{p.v}</span>
   {/if}
 {/each}
@@ -89,5 +96,6 @@
   .blk { display: block; margin: 4px 0; padding: 8px 10px; white-space: pre-wrap; font-size: 0.85em; }
   .men { font-weight: 700; background: color-mix(in srgb, currentColor 14%, transparent); border-radius: 6px; padding: 0 4px; }
   .men.me { background: color-mix(in srgb, var(--accent) 35%, transparent); }
-  .ce { height: 1.4em; width: auto; vertical-align: -0.3em; }
+  .ce { height: 1.9em; width: auto; vertical-align: -0.45em; }
+  .ce.big { height: 3.4rem; vertical-align: middle; margin: 2px; }
 </style>

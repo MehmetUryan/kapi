@@ -715,9 +715,8 @@
                     </div>
                   </form>
                 {:else if m.text}
-                  <span class="txt"><RichText text={m.text} {names} me={user.username} emojis={emojis.byName} /></span>
+                  <span class="txt"><RichText text={m.text} {names} me={user.username} emojis={emojis.byName} />{#if m.editedAt}<small class="ed"> (düzenlendi)</small>{/if}</span>
                 {/if}
-                <small>{time(m.createdAt)}{m.editedAt ? " · düzenlendi" : ""}</small>
                 {#if m.reactions?.length}
                   <div class="rx">
                     {#each m.reactions as r (r.emoji)}
@@ -733,6 +732,7 @@
               </div>
               {#if editingId !== m.id}
                 <div class="tools" class:open={rxFor === m.id}>
+                  {#if rxFor !== m.id}<small class="time" title={dateTime(m.createdAt)}>{time(m.createdAt)}</small>{/if}
                   {#if rxFor === m.id}
                     {#each QUICK as q}
                       <button type="button" class="q" onclick={() => react(m, q)}>{q}</button>
@@ -1005,7 +1005,8 @@
   .mine .bubble { background: var(--accent); color: var(--accent-ink); }
   .bubble b { font-size: 0.75rem; opacity: 0.75; }
   .txt { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
-  .bubble small { font-size: 0.65rem; opacity: 0.6; align-self: flex-end; }
+  .bubble small.ed { font-size: 0.7rem; opacity: 0.6; }
+  .tools .time { align-self: center; color: var(--muted); font-size: 0.72rem; padding: 0 6px; white-space: nowrap; }
   .quote {
     display: flex;
     flex-direction: column;

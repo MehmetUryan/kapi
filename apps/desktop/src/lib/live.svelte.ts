@@ -24,6 +24,8 @@ class Live {
   deletedRoomId = $state<string | null>(null);
   notice = $state<string | null>(null);
   emojisVersion = $state(0);
+  kickedRoomId = $state<string | null>(null);
+  lobbyNotice = $state<string | null>(null);
 
   currentRoom: string | null = null;
   private me = "";
@@ -54,6 +56,7 @@ class Live {
     this.playing = null;
     this.idleFlag = false;
     this.messages = [];
+    this.lobbyNotice = null;
     this.typers = [];
     this.unread = {};
     this.mentionUnread = {};
@@ -85,6 +88,14 @@ class Live {
       else if (data.type === "friends") this.friendsVersion++;
       else if (data.type === "dms") this.dmsVersion++;
       else if (data.type === "emojis") this.emojisVersion++;
+      else if (data.type === "room-kicked") {
+        this.kickedRoomId = data.roomId;
+        this.lobbyNotice = "Bir odaya erişimin kaldırıldı.";
+        if (this.currentRoom === data.roomId) {
+          this.currentRoom = null;
+          this.messages = [];
+        }
+      }
       else if (data.type === "room-cleared") {
         if (data.roomId === this.currentRoom) {
           this.messages = [];

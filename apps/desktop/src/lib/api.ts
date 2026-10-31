@@ -26,6 +26,11 @@ export type Room = {
   canClear?: boolean;
   kind?: "room" | "dm";
   peer?: Friend;
+  createdBy?: string | null;
+  color?: string | null;
+  visibility?: "all" | "allow" | "block";
+  canEdit?: boolean;
+  canReorder?: boolean;
 };
 export type Msg = {
   id: string;
@@ -150,3 +155,11 @@ export async function uploadImage(
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as { error?: string }).error ?? "Yükleme başarısız");
 }
+
+export type InviteRow = {
+  code: string;
+  createdBy: string | null;
+  creator: string | null;
+  createdAt: number | null;
+  expiresAt: number | null;
+};

@@ -3,39 +3,49 @@
   import {
     api,
     type AdminUser,
+    type InviteRow,
     type LogRow,
     type StorageInfo,
     type Usage,
     type User,
   } from "$lib/api";
   import Avatar from "$lib/Avatar.svelte";
+  import InviteDialog from "$lib/InviteDialog.svelte";
 
-  type Tab = "people" | "logs" | "usage";
+  type Tab = "people" | "invites" | "logs" | "usage";
 
   let { user, onback }: { user: User; onback: () => void } = $props();
 
   let tab = $state<Tab>("people");
   let list = $state<AdminUser[]>([]);
+  let invitesList = $state<InviteRow[]>([]);
   let rows = $state<LogRow[]>([]);
   let usage = $state<Usage | null>(null);
   let storage = $state<StorageInfo | null>(null);
   let error = $state("");
   let confirmId = $state<string | null>(null);
   let delId = $state<string | null>(null);
+  let revokeId = $state<string | null>(null);
   let confirmLogs = $state(false);
+  let inviteDialog = $state(false);
   let resetInfo = $state<{ name: string; code: string; expiresAt: number } | null>(null);
   let timer: number | undefined;
   let delTimer: number | undefined;
   let logTimer: number | undefined;
+  let revokeTimer: number | undefined;
 
   const roleLabel = (r?: string) => (r === "owner" ? "Kurucu" : r === "admin" ? "Yönetici" : "Üye");
   const ACTIONS: Record<string, string> = {
     register: "kayıt oldu",
     login: "giriş yaptı",
+    logout: "çıkış yaptı",
     login_fail: "başarısız giriş denemesi",
     invite_create: "davet kodu üretti",
+    invite_revoke: "bir davet kodunu iptal etti",
     room_create: "oda açtı",
     room_delete: "oda sildi",
+    room_update: "oda ayarlarını değiştirdi",
+    room_reorder: "oda sıralamasını değiştirdi",
     room_unlock: "şifreli odaya girdi",
     room_unlock_fail: "oda şifresini yanlış girdi",
     role_change: "rol değiştirdi",
@@ -81,6 +91,10 @@
     guard(async () => {
       list = await api<AdminUser[]>("/api/users");
     });
+  const loadInvites = () =>
+    guard(async () => {
+      invitesList = await api<InviteRow[]>("/api/invites");
+    });
   const loadLogs = () =>
     guard(async () => {
       rows = await api<LogRow[]>("/api/logs");
@@ -95,6 +109,7 @@
     tab = t;
     resetInfo = null;
     if (t === "people") loadPeople();
+    else if (t === "invites") loadInvites();
     else if (t === "logs") loadLogs();
     else loadUsage();
   }
@@ -144,6 +159,20 @@
     });
   }
 
+  function revokeInvite(i: InviteRow) {
+    if (revokeId !== i.code) {
+      revokeId = i.code;
+      clearTimeout(revokeTimer);
+      revokeTimer = window.setTimeout(() => (revokeId = null), 3000);
+      return;
+    }
+    revokeId = null;
+    guard(async () => {
+      await api(`/api/invites/${i.code}`, { method: "DELETE" });
+      await loadInvites();
+    });
+  }
+
   function clearLogs() {
     if (!confirmLogs) {
       confirmLogs = true;
@@ -177,6 +206,7 @@
 
   <div class="tabs">
     <button class:on={tab === "people"} onclick={() => show("people")}>Kişiler</button>
+    <button class:on={tab === "invites"} onclick={() => show("invites")}>Davetler</button>
     <button class:on={tab === "logs"} onclick={() => show("logs")}>Günlük</button>
     <button class:on={tab === "usage"} onclick={() => show("usage")}>Kullanım</button>
   </div>
@@ -224,6 +254,34 @@
             {/if}
           </div>
         </div>
+      {/each}
+    </section>
+  {:else if tab === "invites"}
+    <div class="logbar">
+      <small class="muted">
+        Kullanılmamış ve süresi dolmamış davet kodları. {user.role === "owner" ? "Hepsini görürsün." : "Sadece kendi ürettiklerini görürsün."}
+      </small>
+      <button class="primary" onclick={() => (inviteDialog = true)}>Yeni kod</button>
+    </div>
+    <section class="card list">
+      {#each invitesList as i (i.code)}
+        <div class="row">
+          <div class="who">
+            <code>{i.code}</code>
+            <small>
+              {i.creator ?? "Sistem"}{i.createdAt ? ` · ${when(i.createdAt)}` : ""} ·
+              {i.expiresAt ? `${when(i.expiresAt)} tarihine kadar` : "süresiz"}
+            </small>
+          </div>
+          <div class="acts">
+            <button onclick={() => navigator.clipboard?.writeText(i.code)}>Kopyala</button>
+            <button class="danger" onclick={() => revokeInvite(i)}>
+              {revokeId === i.code ? "Emin misin?" : "İptal et"}
+            </button>
+          </div>
+        </div>
+      {:else}
+        <p class="muted">Aktif davet kodu yok.</p>
       {/each}
     </section>
   {:else if tab === "logs"}
@@ -293,12 +351,16 @@
   {/if}
 </div>
 
+{#if inviteDialog}
+  <InviteDialog onclose={() => (inviteDialog = false)} ondone={loadInvites} />
+{/if}
+
 <style>
   .page { padding: 22px; max-width: 760px; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
   h1 { margin: 0; font-size: 1.6rem; }
   h2 { margin: 0 0 8px; font-size: 1.1rem; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   .tabs button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .note { padding: 12px 16px; margin-bottom: 16px; }
   .err { color: #d1495b; }
@@ -309,7 +371,7 @@
   .row.banned { opacity: 0.6; }
   .row.log { padding: 7px 0; align-items: baseline; }
   .when { min-width: 110px; }
-  .who { flex: 1; display: flex; flex-direction: column; }
+  .who { flex: 1; display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
   .grow { flex: 1; }
   small, .muted { color: var(--muted); }
   .acts { display: flex; gap: 8px; flex-wrap: wrap; }

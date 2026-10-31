@@ -19,6 +19,7 @@ import {
   reactions,
   resetCodes,
   roomMembers,
+  roomVisibility,
   rooms,
   sessions,
   users,
@@ -58,6 +59,7 @@ type Client = {
 };
 type RoomRow = typeof rooms.$inferSelect;
 type AttRow = typeof attachments.$inferSelect;
+type Seer = (roomId: string, user: User) => boolean;
 
 const app = Fastify({ logger: { level: "warn" } });
 await app.register(cors, {
@@ -117,7 +119,7 @@ function addFail(key: string, windowMs: number) {
 function makeInvite(createdBy: string | null, ttlMs: number | null = null) {
   const code = randomBytes(6).toString("hex").toUpperCase();
   const expiresAt = ttlMs ? now() + ttlMs : null;
-  db.insert(invites).values({ code, createdBy, expiresAt }).run();
+  db.insert(invites).values({ code, createdBy, expiresAt, createdAt: now() }).run();
   return { code, expiresAt };
 }
 
@@ -213,8 +215,35 @@ function requireOwner(req: FastifyRequest, reply: FastifyReply) {
   return user;
 }
 
-function canAccess(room: RoomRow, user: User) {
+// ---------- oda görünürlüğü ve erişim ----------
+const genelId = () =>
+  db
+    .select({ id: rooms.id })
+    .from(rooms)
+    .where(eq(rooms.kind, "room"))
+    .orderBy(rooms.createdAt)
+    .get()?.id ?? null;
+
+function isListed(roomId: string, userId: string) {
+  return !!db
+    .select()
+    .from(roomVisibility)
+    .where(and(eq(roomVisibility.roomId, roomId), eq(roomVisibility.userId, userId)))
+    .get();
+}
+
+// odayı görebilir mi? kurucu ve oda sahibi her zaman görür, yöneticiler özel bir hak taşımaz
+function canSee(room: RoomRow, user: User) {
   if (room.kind === "dm") return room.dmA === user.id || room.dmB === user.id;
+  if (user.role === "owner" || room.createdBy === user.id) return true;
+  if (room.visibility === "allow") return isListed(room.id, user.id);
+  if (room.visibility === "block") return !isListed(room.id, user.id);
+  return true;
+}
+
+function canAccess(room: RoomRow, user: User) {
+  if (!canSee(room, user)) return false;
+  if (room.kind === "dm") return true;
   if (!room.passwordHash) return true;
   if (user.role === "owner" || room.createdBy === user.id) return true;
   return !!db
@@ -222,6 +251,48 @@ function canAccess(room: RoomRow, user: User) {
     .from(roomMembers)
     .where(and(eq(roomMembers.roomId, room.id), eq(roomMembers.userId, user.id)))
     .get();
+}
+
+// birçok oda için tek seferde görünürlük hesabı (varlık yayınları için)
+function makeSeer(): Seer {
+  const roomMap = new Map(
+    db
+      .select()
+      .from(rooms)
+      .all()
+      .map((r) => [r.id, r] as [string, RoomRow]),
+  );
+  const vis = new Map<string, Set<string>>();
+  for (const v of db.select().from(roomVisibility).all()) {
+    const s = vis.get(v.roomId) ?? new Set<string>();
+    s.add(v.userId);
+    vis.set(v.roomId, s);
+  }
+  return (roomId, user) => {
+    const room = roomMap.get(roomId);
+    if (!room) return false;
+    if (room.kind === "dm") return room.dmA === user.id || room.dmB === user.id;
+    if (user.role === "owner" || room.createdBy === user.id) return true;
+    const listed = vis.get(roomId)?.has(user.id) ?? false;
+    if (room.visibility === "allow") return listed;
+    if (room.visibility === "block") return !listed;
+    return true;
+  };
+}
+
+function setVisibilityList(roomId: string, userIds: string[], creatorId: string | null) {
+  const valid = userIds.length
+    ? db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, userIds))
+        .all()
+        .map((u) => u.id)
+    : [];
+  db.delete(roomVisibility).where(eq(roomVisibility.roomId, roomId)).run();
+  for (const uid of new Set(valid)) {
+    if (uid !== creatorId) db.insert(roomVisibility).values({ roomId, userId: uid }).run();
+  }
 }
 
 async function kickFromVoice(roomId: string | null, userId: string) {
@@ -236,6 +307,23 @@ async function kickFromVoice(roomId: string | null, userId: string) {
     );
   } catch {
     // oturum zaten bitmiş olabilir
+  }
+}
+
+// erişimini kaybeden kişileri odadan (sohbet ve ses) anında at
+function enforceAccess(room: RoomRow) {
+  for (const c of [...clients]) {
+    if (canAccess(room, c.user)) continue;
+    const inChat = c.roomId === room.id;
+    const inVoice = c.voiceRoomId === room.id;
+    if (!inChat && !inVoice) continue;
+    if (inChat) c.roomId = null;
+    if (inVoice) {
+      endVoice(c);
+      c.voiceRoomId = null;
+      void kickFromVoice(room.id, c.user.id);
+    }
+    c.send({ type: "room-kicked", roomId: room.id });
   }
 }
 
@@ -388,13 +476,32 @@ function voicePresence() {
   return byRoom;
 }
 
-function presenceMessage() {
-  return { type: "presence", rooms: presence(), voice: voicePresence() };
+function pickVisible<T>(m: Record<string, T>, user: User, see: Seer) {
+  const out: Record<string, T> = {};
+  for (const [id, v] of Object.entries(m)) if (see(id, user)) out[id] = v;
+  return out;
+}
+
+function presenceFor(user: User) {
+  const see = makeSeer();
+  return {
+    type: "presence",
+    rooms: pickVisible(presence(), user, see),
+    voice: pickVisible(voicePresence(), user, see),
+  };
 }
 
 function broadcastPresence() {
-  const msg = presenceMessage();
-  for (const c of clients) c.send(msg);
+  const see = makeSeer();
+  const p = presence();
+  const v = voicePresence();
+  for (const c of clients) {
+    c.send({
+      type: "presence",
+      rooms: pickVisible(p, c.user, see),
+      voice: pickVisible(v, c.user, see),
+    });
+  }
 }
 
 type Person = Friend & { status: Status; playing: string | null };
@@ -589,6 +696,8 @@ const fold = (s: string) =>
 
 // ---------- şemalar ----------
 const usernameRule = z.string().trim().min(3).max(20).regex(/^\w+$/);
+const colorRule = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+const visRule = z.enum(["all", "allow", "block"]);
 
 const registerBody = z.object({
   username: usernameRule,
@@ -602,7 +711,17 @@ const loginBody = z.object({
 const roomBody = z.object({
   name: z.string().trim().min(1).max(40),
   password: z.string().min(4).max(64).optional(),
+  color: colorRule.nullable().optional(),
+  visibility: visRule.default("all"),
+  users: z.array(z.string().max(64)).max(200).default([]),
 });
+const roomPatchBody = z.object({
+  name: z.string().trim().min(1).max(40).optional(),
+  color: colorRule.nullable().optional(),
+  visibility: visRule.optional(),
+  users: z.array(z.string().max(64)).max(200).optional(),
+});
+const orderBody = z.object({ ids: z.array(z.string().max(64)).min(1).max(500) });
 const unlockBody = z.object({ password: z.string().max(100) });
 const editBody = z.object({ text: z.string().trim().min(1).max(2000) });
 const reactBody = z.object({
@@ -717,6 +836,17 @@ app.post("/api/login", async (req, reply) => {
   buckets.delete(key);
   log("login", row.id);
   return { token: createSession(row.id, deviceLabel(req)), user: toUser(row) };
+});
+
+// çıkış: sunucudaki oturumu da kapatır
+app.post("/api/logout", async (req) => {
+  const token = req.headers.authorization?.replace(/^Bearer /, "") ?? "";
+  const user = userFromToken(token);
+  if (!user) return { ok: true };
+  db.delete(sessions).where(eq(sessions.token, token)).run();
+  for (const c of [...clients]) if (c.token === token) c.close();
+  log("logout", user.id);
+  return { ok: true };
 });
 
 // ---------- şifre ----------
@@ -905,7 +1035,7 @@ app.get("/api/users/:id/avatar", async (req, reply) => {
     .send(Buffer.from(b64, "base64"));
 });
 
-// herkesin görebileceği kısa üye listesi (@bahsetme için)
+// herkesin görebileceği kısa üye listesi (@bahsetme ve oda görünürlüğü için)
 app.get("/api/members", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
@@ -1177,17 +1307,53 @@ app.get("/api/dms", async (req, reply) => {
   return out;
 });
 
-// ---------- yönetim ----------
-const invitePost = async (req: FastifyRequest, reply: FastifyReply) => {
+// ---------- davet kodları ----------
+app.post("/api/invites", async (req, reply) => {
   const user = requireStaff(req, reply);
   if (!user) return reply;
   const body = inviteBody.parse(req.body ?? {});
   const inv = makeInvite(user.id, body.hours ? body.hours * 3_600_000 : null);
   log("invite_create", user.id, inv.expiresAt ? `${body.hours} saat geçerli` : "süresiz");
   return inv;
-};
-app.post("/api/invites", invitePost);
+});
 
+// kullanılmamış ve süresi dolmamış kodlar (kurucu hepsini, yönetici sadece kendininkileri görür)
+app.get("/api/invites", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const rows = db
+    .select({
+      code: invites.code,
+      createdBy: invites.createdBy,
+      creator: users.username,
+      createdAt: invites.createdAt,
+      expiresAt: invites.expiresAt,
+    })
+    .from(invites)
+    .leftJoin(users, eq(invites.createdBy, users.id))
+    .where(
+      and(isNull(invites.usedBy), or(isNull(invites.expiresAt), gt(invites.expiresAt, now()))),
+    )
+    .orderBy(desc(invites.createdAt))
+    .all();
+  return me.role === "owner" ? rows : rows.filter((r) => r.createdBy === me.id);
+});
+
+app.delete("/api/invites/:code", async (req, reply) => {
+  const me = requireStaff(req, reply);
+  if (!me) return reply;
+  const { code } = req.params as { code: string };
+  const row = db.select().from(invites).where(eq(invites.code, code)).get();
+  if (!row || row.usedBy) return reply.code(404).send({ error: "Kod bulunamadı" });
+  if (row.createdBy !== me.id && me.role !== "owner") {
+    return reply.code(403).send({ error: "Bu kodu sadece üreten kişi ya da kurucu iptal edebilir" });
+  }
+  db.delete(invites).where(eq(invites.code, code)).run();
+  log("invite_revoke", me.id);
+  return { ok: true };
+});
+
+// ---------- yönetim ----------
 app.get("/api/users", async (req, reply) => {
   const me = requireStaff(req, reply);
   if (!me) return reply;
@@ -1347,6 +1513,7 @@ app.delete("/api/users/:id", async (req, reply) => {
   db.run(sql`DELETE FROM messages WHERE room_id IN ${dmIds}`);
   db.run(sql`DELETE FROM rooms WHERE kind = 'dm' AND (dm_a = ${id} OR dm_b = ${id})`);
   db.run(sql`DELETE FROM friendships WHERE user_a = ${id} OR user_b = ${id}`);
+  db.run(sql`DELETE FROM room_visibility WHERE user_id = ${id}`);
   db.run(
     sql`DELETE FROM reactions WHERE user_id = ${id} OR message_id IN (SELECT id FROM messages WHERE user_id = ${id})`,
   );
@@ -1369,16 +1536,30 @@ app.delete("/api/users/:id", async (req, reply) => {
 app.get("/api/rooms", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
-  const all = db.select().from(rooms).where(eq(rooms.kind, "room")).orderBy(rooms.createdAt).all();
-  return all.map((r, i) => ({
-    id: r.id,
-    name: r.name,
-    createdAt: r.createdAt,
-    locked: !!r.passwordHash,
-    access: canAccess(r, user),
-    canDelete: i > 0 && (r.createdBy === user.id || isStaff(user)),
-    canClear: r.createdBy === user.id || isStaff(user),
-  }));
+  const all = db
+    .select()
+    .from(rooms)
+    .where(eq(rooms.kind, "room"))
+    .orderBy(rooms.position, rooms.createdAt)
+    .all();
+  const genel = genelId();
+  const staff = isStaff(user);
+  return all
+    .filter((r) => canSee(r, user))
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      createdAt: r.createdAt,
+      createdBy: r.createdBy,
+      color: r.color,
+      visibility: r.visibility,
+      locked: !!r.passwordHash,
+      access: canAccess(r, user),
+      canDelete: r.id !== genel && (r.createdBy === user.id || staff),
+      canClear: r.createdBy === user.id || staff,
+      canEdit: r.createdBy === user.id || user.role === "owner",
+      canReorder: staff,
+    }));
 });
 
 app.post("/api/rooms", async (req, reply) => {
@@ -1386,6 +1567,12 @@ app.post("/api/rooms", async (req, reply) => {
   if (!user) return reply;
   const body = roomBody.parse(req.body);
   const id = randomUUID();
+  const maxPos =
+    db
+      .select({ m: sql<number>`coalesce(max(position), -1)` })
+      .from(rooms)
+      .where(eq(rooms.kind, "room"))
+      .get()?.m ?? -1;
   db.insert(rooms)
     .values({
       id,
@@ -1393,11 +1580,97 @@ app.post("/api/rooms", async (req, reply) => {
       createdAt: now(),
       createdBy: user.id,
       passwordHash: body.password ? hashPassword(body.password) : null,
+      color: body.color ? body.color.toLowerCase() : null,
+      visibility: body.visibility,
+      position: maxPos + 1,
     })
     .run();
-  log("room_create", user.id, `${body.name}${body.password ? " (şifreli)" : ""}`);
+  if (body.visibility !== "all") setVisibilityList(id, body.users, user.id);
+  log(
+    "room_create",
+    user.id,
+    `${body.name}${body.password ? " (şifreli)" : ""}${body.visibility !== "all" ? " (kısıtlı görünürlük)" : ""}`,
+  );
   for (const c of clients) c.send({ type: "rooms" });
   return { id, name: body.name, locked: !!body.password };
+});
+
+// oda sıralaması: yönetici ve kurucu, herkes için ortak
+app.patch("/api/rooms/order", async (req, reply) => {
+  const user = requireStaff(req, reply);
+  if (!user) return reply;
+  const { ids } = orderBody.parse(req.body);
+  const all = db
+    .select()
+    .from(rooms)
+    .where(eq(rooms.kind, "room"))
+    .orderBy(rooms.position, rooms.createdAt)
+    .all();
+  const visible = all.filter((r) => canSee(r, user)).map((r) => r.id);
+  const visSet = new Set(visible);
+  if (ids.length !== visible.length || new Set(ids).size !== ids.length || !ids.every((i) => visSet.has(i))) {
+    return reply.code(400).send({ error: "Sıralama geçersiz, listeyi yenile" });
+  }
+  const order = all.map((r) => r.id);
+  const slots = order.map((rid, i) => (visSet.has(rid) ? i : -1)).filter((i) => i >= 0);
+  slots.forEach((slot, k) => {
+    order[slot] = ids[k];
+  });
+  order.forEach((rid, i) => {
+    db.update(rooms).set({ position: i }).where(eq(rooms.id, rid)).run();
+  });
+  log("room_reorder", user.id);
+  for (const c of clients) c.send({ type: "rooms" });
+  return { ok: true };
+});
+
+// oda ayarları (ad, renk, görünürlük): oda sahibi ya da kurucu
+app.patch("/api/rooms/:id", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room || room.kind === "dm" || !canSee(room, user)) {
+    return reply.code(404).send({ error: "Oda bulunamadı" });
+  }
+  if (room.createdBy !== user.id && user.role !== "owner") {
+    return reply.code(403).send({ error: "Odayı sadece kuran kişi ya da kurucu düzenleyebilir" });
+  }
+  const body = roomPatchBody.parse(req.body);
+  const patch: Partial<typeof rooms.$inferInsert> = {};
+  if (body.name !== undefined) patch.name = body.name;
+  if (body.color !== undefined) patch.color = body.color ? body.color.toLowerCase() : null;
+  if (body.visibility !== undefined) patch.visibility = body.visibility;
+  if (Object.keys(patch).length > 0) {
+    db.update(rooms).set(patch).where(eq(rooms.id, id)).run();
+  }
+  if (body.users !== undefined) setVisibilityList(id, body.users, room.createdBy);
+  log("room_update", user.id, `oda: ${patch.name ?? room.name}`);
+  const fresh = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (fresh) enforceAccess(fresh);
+  for (const c of clients) c.send({ type: "rooms" });
+  broadcastPresence();
+  return { ok: true };
+});
+
+app.get("/api/rooms/:id/visibility", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room || room.kind === "dm" || !canSee(room, user)) {
+    return reply.code(404).send({ error: "Oda bulunamadı" });
+  }
+  if (room.createdBy !== user.id && user.role !== "owner") {
+    return reply.code(403).send({ error: "Yetkin yok" });
+  }
+  const list = db
+    .select({ userId: roomVisibility.userId })
+    .from(roomVisibility)
+    .where(eq(roomVisibility.roomId, id))
+    .all()
+    .map((r) => r.userId);
+  return { visibility: room.visibility, users: list };
 });
 
 app.post("/api/rooms/:id/unlock", async (req, reply) => {
@@ -1406,7 +1679,7 @@ app.post("/api/rooms/:id/unlock", async (req, reply) => {
   const { id } = req.params as { id: string };
   const body = unlockBody.parse(req.body);
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!room.passwordHash || canAccess(room, user)) return { ok: true };
 
   const key = `unlock:${user.id}:${id}`;
@@ -1443,7 +1716,7 @@ app.get("/api/rooms/:id/messages", async (req, reply) => {
   const { id } = req.params as { id: string };
   const q = historyQuery.parse(req.query);
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const rows = db
     .select(messageCols)
@@ -1466,7 +1739,7 @@ app.get("/api/rooms/:id/search", async (req, reply) => {
   const { id } = req.params as { id: string };
   const { q } = searchQuery.parse(req.query);
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const needle = fold(q);
   const rows = db
@@ -1487,7 +1760,7 @@ app.post("/api/rooms/:id/images", async (req, reply) => {
   if (!user) return reply;
   const { id } = req.params as { id: string };
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
 
   const key = `upload:${user.id}`;
@@ -1643,13 +1916,13 @@ app.post("/api/messages/:id/reactions", async (req, reply) => {
   return { ok: true };
 });
 
-// sohbeti temizle: odayı kuran kişi, yönetici ve kurucu
+// sohbeti temizle: odayı kuran kişi, yönetici ve kurucu (görebildikleri odalarda)
 app.post("/api/rooms/:id/clear", async (req, reply) => {
   const user = requireUser(req, reply);
   if (!user) return reply;
   const { id } = req.params as { id: string };
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (room.kind === "dm") {
     return reply.code(403).send({ error: "Özel mesajlar buradan temizlenemez" });
   }
@@ -1672,10 +1945,9 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   if (!user) return reply;
   const { id } = req.params as { id: string };
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (room.kind === "dm") return reply.code(403).send({ error: "Özel görüşme silinemez" });
-  const first = db.select().from(rooms).where(eq(rooms.kind, "room")).orderBy(rooms.createdAt).get();
-  if (first?.id === id) return reply.code(403).send({ error: "Genel oda silinemez" });
+  if (genelId() === id) return reply.code(403).send({ error: "Genel oda silinemez" });
   if (room.createdBy !== user.id && !isStaff(user)) {
     return reply
       .code(403)
@@ -1683,6 +1955,7 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   }
   removeAttachments(roomAttachmentIds(id));
   db.delete(roomMembers).where(eq(roomMembers.roomId, id)).run();
+  db.delete(roomVisibility).where(eq(roomVisibility.roomId, id)).run();
   db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
@@ -1707,7 +1980,7 @@ app.post("/api/rooms/:id/voice-token", async (req, reply) => {
   if (!user) return reply;
   const { id } = req.params as { id: string };
   const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
-  if (!room) return reply.code(404).send({ error: "Oda bulunamadı" });
+  if (!room || !canSee(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
   if (!canAccess(room, user)) return reply.code(403).send({ error: "Bu oda şifreli" });
   const key = process.env.LIVEKIT_API_KEY;
   const secret = process.env.LIVEKIT_API_SECRET;
@@ -1750,7 +2023,7 @@ app.get("/ws", { websocket: true }, (socket, req) => {
     close: () => socket.close(4403, "closed"),
   };
   clients.add(client);
-  client.send(presenceMessage());
+  client.send(presenceFor(user));
   client.send({ type: "people", people: peopleSnapshot() });
   client.send({ type: "my-status", status: savedStatus });
   schedulePeople();
@@ -1856,13 +2129,15 @@ setInterval(cleanup, 6 * 3_600_000);
 
 // ---------- başlangıç ----------
 if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
-  db.insert(rooms).values({ id: randomUUID(), name: "Genel", createdAt: now() }).run();
+  db.insert(rooms)
+    .values({ id: randomUUID(), name: "Genel", createdAt: now(), position: 0 })
+    .run();
 }
 
 const port = Number(process.env.PORT ?? 3000);
 await app.listen({ port, host: "0.0.0.0" });
 console.log(`\n  Kapı sunucusu çalışıyor: http://localhost:${port}`);
-console.log("  Sunucu kodu: paket-8 (resim, emoji, temizleme, oturum günlüğü)");
+console.log("  Sunucu kodu: paket-9 (oda gizliliği, renk, sıralama, davetler, çıkış günlüğü)");
 
 if (!db.select().from(users).get()) {
   const unused = db.select().from(invites).where(isNull(invites.usedBy)).get();

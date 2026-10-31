@@ -1,5 +1,7 @@
 param(
-  [Parameter(Mandatory = $true)][string]$Version,
+  [Parameter(Mandatory = $true)]
+  [ValidatePattern('^\d+\.\d+\.\d+$')]
+  [string]$Version,
   [string]$Note = ""
 )
 Set-Location $PSScriptRoot
@@ -14,7 +16,10 @@ if ($ok -ne "e") { git reset | Out-Null; Write-Host "Iptal edildi."; exit }
 
 if ($Note) { $msg = "Release ${Version}: $Note" } else { $msg = "Release $Version" }
 git commit -m $msg
+if ($LASTEXITCODE -ne 0) { Write-Host "Commit basarisiz."; exit 1 }
 git push
+if ($LASTEXITCODE -ne 0) { Write-Host "Push basarisiz."; exit 1 }
 git tag "v$Version"
+if ($LASTEXITCODE -ne 0) { Write-Host "Etiket olusturulamadi (v$Version zaten var mi?)."; exit 1 }
 git push origin "v$Version"
 Write-Host "v$Version gonderildi. GitHub > Actions sekmesinden derlemeyi izle."

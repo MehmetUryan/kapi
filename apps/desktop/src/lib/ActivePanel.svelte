@@ -52,7 +52,7 @@
       <Dot status={p.status} />
     </span>
     <div class="who">
-      <b>{p.username}{isSelf ? " (sen)" : ""}</b>
+    <b>{p.username}</b>
       <small>{p.playing ? `🎮 ${p.playing}` : statusLabel(p.status)}</small>
     </div>
     {#if !isSelf}
