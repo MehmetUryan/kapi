@@ -7,8 +7,6 @@ import { voice } from "./voice.svelte";
 
 const IDLE_MS = 10 * 60 * 1000;
 const EVENTS = ["mousemove", "mousedown", "keydown", "wheel", "touchstart", "focus"];
-
-// çalışan programın .exe adı → görünecek oyun adı (eksik olanı Profil'den ekleyebilirsin)
 const GAMES: Record<string, string> = {
   "valorant-win64-shipping.exe": "VALORANT",
   "cs2.exe": "Counter-Strike 2",
@@ -100,7 +98,6 @@ class Social {
     this.detected = null;
   }
 
-  // 10 dakika hareketsizsen "Dışarıda" olursun (seste ya da oyundayken olmaz)
   private tickIdle() {
     const active = voice.joined || !!live.playing || Date.now() - this.lastInput < IDLE_MS;
     const idle = !active;

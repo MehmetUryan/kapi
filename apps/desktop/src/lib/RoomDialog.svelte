@@ -146,7 +146,7 @@
           <UserPicker bind:selected {excludeId} />
         {/if}
       {/if}
-      <small class="note">
+        <small class="note">
         Odayı göremeyen kişiler listede göremez, giremez ve bildirim almaz. Odadayken erişimi
         kaldırılan biri <b>anında</b> sohbetten ve sesten atılır. <b>Kurucu her odayı görebilir.</b>
       </small>

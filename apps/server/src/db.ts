@@ -43,6 +43,7 @@ export const rooms = sqliteTable("rooms", {
   visibility: text("visibility").notNull().default("all"),
   color: text("color"),
   position: integer("position"),
+  pinned: integer("pinned").notNull().default(0),
 });
 
 export const roomMembers = sqliteTable("room_members", {
@@ -252,6 +253,13 @@ export const roomVisibility = sqliteTable("room_visibility", {
   userId: text("user_id").notNull(),
 });
 
+export const pins = sqliteTable("pins", {
+  messageId: text("message_id").primaryKey(),
+  roomId: text("room_id").notNull(),
+  pinnedBy: text("pinned_by").notNull(),
+  pinnedAt: integer("pinned_at").notNull(),
+});
+
 const sesCols = sqlite.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
 if (!sesCols.some((c) => c.name === "id")) {
   sqlite.exec("ALTER TABLE sessions ADD COLUMN id TEXT");
@@ -309,6 +317,20 @@ sqlite.exec(`
     user_id TEXT NOT NULL,
     PRIMARY KEY (room_id, user_id)
   );
+`);
+
+const roomCols4 = sqlite.prepare("PRAGMA table_info(rooms)").all() as { name: string }[];
+if (!roomCols4.some((c) => c.name === "pinned")) {
+  sqlite.exec("ALTER TABLE rooms ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+}
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS pins (
+    message_id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    pinned_by TEXT NOT NULL,
+    pinned_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_pins_room ON pins (room_id);
 `);
 
 export const db = drizzle(sqlite);

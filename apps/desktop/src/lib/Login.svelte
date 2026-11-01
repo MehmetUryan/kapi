@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, getServer, setServer, setSession, type User } from "$lib/api";
   import PasswordInput from "$lib/PasswordInput.svelte";
+  import { isTauri } from "$lib/env";
 
   let { onlogin, notice = "" }: { onlogin: (u: User) => void; notice?: string } = $props();
 
@@ -53,7 +54,9 @@
     <p class="sub">{subtitle[mode]}</p>
     {#if notice}<p class="err">{notice}</p>{/if}
 
-    <label>Sunucu <input bind:value={server} placeholder="http://localhost:3000" /></label>
+    {#if isTauri() || import.meta.env.DEV}
+      <label>Sunucu <input bind:value={server} placeholder="http://localhost:3000" /></label>
+    {/if}
     <label>Kullanıcı adı <input bind:value={username} autocomplete="username" /></label>
     <div class="field">
       <small>{mode === "reset" ? "Yeni şifre" : "Şifre"}</small>
@@ -71,6 +74,13 @@
     {/if}
 
     {#if error}<p class="err">{error}</p>{/if}
+
+        {#if !isTauri() && !import.meta.env.DEV}
+      <small>
+        Windows için masaüstü uygulaması:
+        <a href="https://github.com/MehmetUryan/kapi/releases/latest" target="_blank" rel="noopener">indiriniz</a>
+      </small>
+    {/if}
 
     <button class="primary" disabled={busy}>
       {mode === "login" ? "Giriş yap" : mode === "register" ? "Kayıt ol" : "Şifreyi değiştir ve gir"}

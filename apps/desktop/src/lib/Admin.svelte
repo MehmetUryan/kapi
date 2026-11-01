@@ -64,6 +64,9 @@
     emoji_delete: "özel emoji sildi",
     chat_clear: "sohbeti temizledi",
     logs_clear: "günlüğü temizledi",
+    room_pin: "oda sabitlemesini değiştirdi",
+    message_pin: "mesaj sabitledi",
+    message_unpin: "mesaj sabitlemesini kaldırdı",
   };
   const when = (t: number) =>
     new Date(t).toLocaleString("tr-TR", {

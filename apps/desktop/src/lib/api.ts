@@ -31,6 +31,8 @@ export type Room = {
   visibility?: "all" | "allow" | "block";
   canEdit?: boolean;
   canReorder?: boolean;
+  pinned?: boolean;
+  canPin?: boolean;
 };
 export type Msg = {
   id: string;
@@ -50,8 +52,14 @@ export type Msg = {
 
 const K = { server: "kapi.server", token: "kapi.token", migrated: "kapi.serverMigrated" };
 
-// Yayınlanan uygulamanın varsayılan sunucusu
-const DEFAULT_SERVER = import.meta.env.DEV ? "http://localhost:3000" : "https://desktop63.tail8e6588.ts.net";
+// Yayınlanan masaüstü uygulamasının varsayılan sunucu adresi
+const APP_SERVER = "https://desktop63.tail8e6588.ts.net";
+// Tarayıcıda aynı adresten açıldığı için sunucu da aynı adrestir
+const DEFAULT_SERVER = import.meta.env.DEV
+  ? "http://localhost:3000"
+  : isTauri()
+    ? APP_SERVER
+    : window.location.origin;
 
 export const getServer = () => {
   let saved = localStorage.getItem(K.server);
@@ -162,4 +170,15 @@ export type InviteRow = {
   creator: string | null;
   createdAt: number | null;
   expiresAt: number | null;
+};
+
+export type PinInfo = {
+  id: string;
+  userId: string;
+  username: string;
+  avatarAt: number | null;
+  text: string;
+  createdAt: number;
+  pinnedAt: number;
+  attachment: Attachment | null;
 };

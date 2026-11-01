@@ -1,5 +1,6 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -16,6 +17,7 @@ import {
   invites,
   logs,
   messages,
+  pins,
   reactions,
   resetCodes,
   roomMembers,
@@ -30,7 +32,7 @@ import { hashPassword, verifyPassword } from "./auth.js";
 try {
   process.loadEnvFile(fileURLToPath(new URL("../../../.env", import.meta.url)));
 } catch {
-  // .env yoksa sesli oda çalışmaz, geri kalan her şey çalışır
+  // .env yoksa sesli oda çalışmaz
 }
 
 const UPLOAD_DIR = fileURLToPath(new URL("../uploads/", import.meta.url));
@@ -232,7 +234,7 @@ function isListed(roomId: string, userId: string) {
     .get();
 }
 
-// odayı görebilir mi? kurucu ve oda sahibi her zaman görür, yöneticiler özel bir hak taşımaz
+// odayı kurucu ve oda sahibi her zaman görür, yöneticiler özel bir hak taşımaz
 function canSee(room: RoomRow, user: User) {
   if (room.kind === "dm") return room.dmA === user.id || room.dmB === user.id;
   if (user.role === "owner" || room.createdBy === user.id) return true;
@@ -310,7 +312,7 @@ async function kickFromVoice(roomId: string | null, userId: string) {
   }
 }
 
-// erişimini kaybeden kişileri odadan (sohbet ve ses) anında at
+// erişimini kaybeden kişileri odadan anında at
 function enforceAccess(room: RoomRow) {
   for (const c of [...clients]) {
     if (canAccess(room, c.user)) continue;
@@ -1317,7 +1319,6 @@ app.post("/api/invites", async (req, reply) => {
   return inv;
 });
 
-// kullanılmamış ve süresi dolmamış kodlar (kurucu hepsini, yönetici sadece kendininkileri görür)
 app.get("/api/invites", async (req, reply) => {
   const me = requireStaff(req, reply);
   if (!me) return reply;
@@ -1540,7 +1541,7 @@ app.get("/api/rooms", async (req, reply) => {
     .select()
     .from(rooms)
     .where(eq(rooms.kind, "room"))
-    .orderBy(rooms.position, rooms.createdAt)
+    .orderBy(desc(rooms.pinned), rooms.position, rooms.createdAt)
     .all();
   const genel = genelId();
   const staff = isStaff(user);
@@ -1559,6 +1560,8 @@ app.get("/api/rooms", async (req, reply) => {
       canClear: r.createdBy === user.id || staff,
       canEdit: r.createdBy === user.id || user.role === "owner",
       canReorder: staff,
+      pinned: !!r.pinned,
+      canPin: staff,
     }));
 });
 
@@ -1754,6 +1757,114 @@ app.get("/api/rooms/:id/search", async (req, reply) => {
   return decorate(found);
 });
 
+// ---------- sabitleme ----------
+const PIN_LIMIT = 10;
+const pinBody = z.object({ pinned: z.boolean() });
+
+// odayı listenin başına sabitle: yönetici ve kurucu
+app.patch("/api/rooms/:id/pin", async (req, reply) => {
+  const user = requireStaff(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const body = pinBody.parse(req.body);
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room || room.kind === "dm" || !canSee(room, user)) {
+    return reply.code(404).send({ error: "Oda bulunamadı" });
+  }
+  db.update(rooms).set({ pinned: body.pinned ? 1 : 0 }).where(eq(rooms.id, id)).run();
+  log("room_pin", user.id, `${body.pinned ? "sabitlendi" : "sabitleme kaldırıldı"} · ${room.name}`);
+  for (const c of clients) c.send({ type: "rooms" });
+  return { ok: true };
+});
+
+// mesaj sabitleme: oda sahibi, yönetici, kurucu (özel mesajlarda iki taraf)
+const canPinIn = (room: RoomRow, user: User) =>
+  canAccess(room, user) && (room.kind === "dm" || room.createdBy === user.id || isStaff(user));
+
+function pinsOf(roomId: string) {
+  const rows = db
+    .select({
+      id: messages.id,
+      userId: messages.userId,
+      username: users.username,
+      avatarAt: users.avatarAt,
+      text: messages.text,
+      createdAt: messages.createdAt,
+      attachmentId: messages.attachmentId,
+      pinnedAt: pins.pinnedAt,
+    })
+    .from(pins)
+    .innerJoin(messages, eq(pins.messageId, messages.id))
+    .innerJoin(users, eq(messages.userId, users.id))
+    .where(eq(pins.roomId, roomId))
+    .orderBy(desc(pins.pinnedAt))
+    .all();
+  const attIds = rows.map((r) => r.attachmentId).filter((x): x is string => !!x);
+  const atts = new Map(
+    (attIds.length
+      ? db.select().from(attachments).where(inArray(attachments.id, attIds)).all()
+      : []
+    ).map((a) => [a.id, a] as [string, AttRow]),
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    username: r.username,
+    avatarAt: r.avatarAt,
+    text: r.text,
+    createdAt: r.createdAt,
+    pinnedAt: r.pinnedAt,
+    attachment: r.attachmentId ? toAttachment(atts.get(r.attachmentId)) : null,
+  }));
+}
+
+app.get("/api/rooms/:id/pins", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const room = db.select().from(rooms).where(eq(rooms.id, id)).get();
+  if (!room || !canAccess(room, user)) return reply.code(404).send({ error: "Oda bulunamadı" });
+  return pinsOf(id);
+});
+
+app.post("/api/messages/:id/pin", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const m = db.select().from(messages).where(eq(messages.id, id)).get();
+  if (!m) return reply.code(404).send({ error: "Mesaj bulunamadı" });
+  const room = db.select().from(rooms).where(eq(rooms.id, m.roomId)).get();
+  if (!room || !canPinIn(room, user)) {
+    return reply.code(403).send({ error: "Mesaj sabitleme yetkin yok" });
+  }
+  if (!db.select().from(pins).where(eq(pins.messageId, id)).get()) {
+    const count = db.select({ n: sql<number>`count(*)` }).from(pins).where(eq(pins.roomId, room.id)).get()?.n ?? 0;
+    if (count >= PIN_LIMIT) {
+      return reply.code(400).send({ error: `En fazla ${PIN_LIMIT} mesaj sabitlenebilir` });
+    }
+    db.insert(pins).values({ messageId: id, roomId: room.id, pinnedBy: user.id, pinnedAt: now() }).run();
+    if (room.kind !== "dm") log("message_pin", user.id, `oda: ${room.name}`);
+  }
+  sendToRoom(room.id, { type: "pins", roomId: room.id });
+  return { ok: true };
+});
+
+app.delete("/api/messages/:id/pin", async (req, reply) => {
+  const user = requireUser(req, reply);
+  if (!user) return reply;
+  const { id } = req.params as { id: string };
+  const m = db.select().from(messages).where(eq(messages.id, id)).get();
+  if (!m) return reply.code(404).send({ error: "Mesaj bulunamadı" });
+  const room = db.select().from(rooms).where(eq(rooms.id, m.roomId)).get();
+  if (!room || !canPinIn(room, user)) {
+    return reply.code(403).send({ error: "Mesaj sabitleme yetkin yok" });
+  }
+  db.delete(pins).where(eq(pins.messageId, id)).run();
+  if (room.kind !== "dm") log("message_unpin", user.id, `oda: ${room.name}`);
+  sendToRoom(room.id, { type: "pins", roomId: room.id });
+  return { ok: true };
+});
+
 // ---------- resim yükleme ve indirme ----------
 app.post("/api/rooms/:id/images", async (req, reply) => {
   const user = requireUser(req, reply);
@@ -1860,6 +1971,7 @@ app.delete("/api/messages/:id", async (req, reply) => {
     return reply.code(403).send({ error: "Bu odaya erişimin yok" });
   }
   if (m.attachmentId) removeAttachments([m.attachmentId]);
+  db.delete(pins).where(eq(pins.messageId, id)).run();
   db.delete(reactions).where(eq(reactions.messageId, id)).run();
   db.delete(messages).where(eq(messages.id, id)).run();
   if (room.kind !== "dm") {
@@ -1875,6 +1987,7 @@ app.delete("/api/messages/:id", async (req, reply) => {
     }
   }
   sendToRoom(m.roomId, { type: "message-deleted", id, roomId: m.roomId });
+  sendToRoom(m.roomId, { type: "pins", roomId: m.roomId });
   if (room.kind === "dm" && room.dmA && room.dmB) notifyUsers([room.dmA, room.dmB], { type: "dms" });
   return { ok: true };
 });
@@ -1935,6 +2048,7 @@ app.post("/api/rooms/:id/clear", async (req, reply) => {
   removeAttachments(roomAttachmentIds(id));
   db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
   db.delete(messages).where(eq(messages.roomId, id)).run();
+    db.delete(pins).where(eq(pins.roomId, id)).run();
   log("chat_clear", user.id, `oda: ${room.name} · ${n} mesaj`);
   sendToRoom(id, { type: "room-cleared", roomId: id, by: user.username });
   return { ok: true, count: n };
@@ -1959,6 +2073,7 @@ app.delete("/api/rooms/:id", async (req, reply) => {
   db.run(sql`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room_id = ${id})`);
   db.delete(messages).where(eq(messages.roomId, id)).run();
   db.delete(rooms).where(eq(rooms.id, id)).run();
+  db.delete(pins).where(eq(pins.roomId, id)).run();
   log("room_delete", user.id, room.name);
   for (const c of clients) {
     if (c.roomId === id || c.voiceRoomId === id) {
@@ -2103,9 +2218,11 @@ function cleanup() {
   db.delete(voiceSessions).where(lt(voiceSessions.joinedAt, t - 120 * 86_400_000)).run();
   db.delete(resetCodes).where(lt(resetCodes.expiresAt, t)).run();
   db.run(sql`DELETE FROM reactions WHERE message_id NOT IN (SELECT id FROM messages)`);
+  db.run(sql`DELETE FROM pins WHERE message_id NOT IN (SELECT id FROM messages)`);
+  db.run(sql`DELETE FROM pins WHERE message_id NOT IN (SELECT id FROM messages)`);
   for (const [k, b] of buckets) if (b.reset < t) buckets.delete(k);
 
-  // 30 günden eski resimleri sil (mesaj kalır, "süresi doldu" yazar)
+  // 30 günden eski resimleri sil
   const old = db
     .select({ id: attachments.id })
     .from(attachments)
@@ -2134,10 +2251,36 @@ if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
     .run();
 }
 
+// ---------- web sürümü: derlenmiş arayüzü tarayıcıya sunar ----------
+const WEB_DIR =
+  process.env.WEB_DIR || fileURLToPath(new URL("../../desktop/build/", import.meta.url));
+const webReady = existsSync(join(WEB_DIR, "index.html"));
+if (webReady) {
+  await app.register(fastifyStatic, {
+    root: WEB_DIR,
+    setHeaders: (res, filePath) => {
+      res.setHeader(
+        "Cache-Control",
+        /[\\/]_app[\\/]immutable[\\/]/.test(filePath)
+          ? "public, max-age=31536000, immutable"
+          : "no-cache",
+      );
+    },
+  });
+}
+app.setNotFoundHandler((req, reply) => {
+  const p = req.url.split("?")[0];
+  if (webReady && req.method === "GET" && !p.startsWith("/api/") && p !== "/ws") {
+    return reply.header("Cache-Control", "no-cache").sendFile("index.html");
+  }
+  return reply.code(404).send({ error: "Bulunamadı" });
+});
+
 const port = Number(process.env.PORT ?? 3000);
 await app.listen({ port, host: "0.0.0.0" });
 console.log(`\n  Kapı sunucusu çalışıyor: http://localhost:${port}`);
-console.log("  Sunucu kodu: paket-9 (oda gizliliği, renk, sıralama, davetler, çıkış günlüğü)");
+console.log("  Sunucu kodu: paket-10 (web sürümü, oda ve mesaj sabitleme)");
+console.log(webReady ? "  Web sürümü: açık" : "  Web sürümü: kapalı (apps\\desktop içinde pnpm build çalıştır)");
 
 if (!db.select().from(users).get()) {
   const unused = db.select().from(invites).where(isNull(invites.usedBy)).get();

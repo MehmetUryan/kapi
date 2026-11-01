@@ -39,7 +39,7 @@ jobs:
           tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: "Kapı ${{ github.ref_name }}"
-          releaseBody: "Kurulum için Kapi_..._x64-setup.exe dosyasını indir."
+          releaseBody: "Windows için kurulum dosyası: Kapi_..._x64-setup.exe dosyasını indiriniz ve çalıştırınız. Daha önce kurduysanız uygulama kendiliğinden güncellenir."
           releaseDraft: false
           prerelease: false
           args: --bundles nsis

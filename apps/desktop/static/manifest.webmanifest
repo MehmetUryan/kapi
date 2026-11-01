@@ -1,0 +1,14 @@
+{
+  "name": "Kapı",
+  "short_name": "Kapı",
+  "description": "Arkadaşlar için hafif sesli ve yazılı sohbet",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fbf6ee",
+  "theme_color": "#fbf6ee",
+  "lang": "tr",
+  "icons": [
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

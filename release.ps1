@@ -9,6 +9,10 @@ Set-Location $PSScriptRoot
 $env:V = $Version
 node -e "const fs=require('fs');const p='apps/desktop/src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.env.V;fs.writeFileSync(p,JSON.stringify(c,null,2));"
 
+Write-Host "Web arayuzu derleniyor..."
+pnpm --dir apps/desktop run build
+if ($LASTEXITCODE -ne 0) { Write-Host "Web derlemesi basarisiz."; exit 1 }
+
 git add .
 git status --short
 $ok = Read-Host "Bu degisiklikler v$Version olarak yayinlansin mi? (e/h)"

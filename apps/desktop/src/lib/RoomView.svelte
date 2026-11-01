@@ -1,12 +1,20 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { Track } from "livekit-client";
-  import { api, emojiUrl, uploadImage, type Msg, type Room, type User } from "$lib/api";
+  import {
+    api,
+    emojiUrl,
+    uploadImage,
+    type Msg,
+    type PinInfo,
+    type Room,
+    type User,
+  } from "$lib/api";
   import { emojis } from "$lib/emojis.svelte";
   import { isTauri } from "$lib/env";
   import { prepareImage } from "$lib/imageTools";
   import { live } from "$lib/live.svelte";
-  import { prefs, type ShareQuality } from "$lib/prefs.svelte";
+  import { inkFor, prefs, type ShareQuality } from "$lib/prefs.svelte";
   import { voice } from "$lib/voice.svelte";
   import Avatar from "$lib/Avatar.svelte";
   import AuthImage from "$lib/AuthImage.svelte";
@@ -35,6 +43,8 @@
     { id: "high", name: "Yüksek", desc: "1080p · 60 fps · ~2,7 GB/sa" },
   ];
 
+  const canShare = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getDisplayMedia;
+
   let text = $state("");
   let list = $state<HTMLDivElement>();
   let inner = $state<HTMLDivElement>();
@@ -43,6 +53,7 @@
   let emojiOpen = $state(false);
   let emojiTab = $state<"std" | "custom">("std");
   let rxFor = $state<string | null>(null);
+  let touchFor = $state<string | null>(null);
   let volFor = $state<string | null>(null);
   let shareOpen = $state(false);
   let editingId = $state<string | null>(null);
@@ -63,10 +74,17 @@
   let dragging = $state(false);
   let lightbox = $state<string | null>(null);
   let confirmClear = $state(false);
+  let roomName = $state(untrack(() => room.name));
+  let roomColor = $state<string | null>(untrack(() => room.color ?? null));
+  let pins = $state<PinInfo[]>([]);
+  let pinsOpen = $state(false);
   let stick = true;
 
   const staff = $derived(user.role === "owner" || user.role === "admin");
   const canClear = $derived(room.kind !== "dm" && !!room.canClear);
+  const canPinMsg = $derived(room.kind === "dm" ? true : !!room.canClear);
+  const title = $derived(room.kind === "dm" ? room.name : roomName);
+  const pinnedIds = $derived(new Set(pins.map((p) => p.id)));
 
   const voiceMembers = $derived(live.voice[room.id] ?? []);
   const chatMembers = $derived(live.presence[room.id] ?? []);
@@ -102,6 +120,46 @@
       live.leave();
       clearPending();
     };
+  });
+
+  // oda değişince adı ve rengi yeni odadan al
+  $effect(() => {
+    roomName = room.name;
+    roomColor = room.color ?? null;
+  });
+
+  // oda adı ya da rengi değiştirilirse içeridekilerde de güncelle
+  $effect(() => {
+    live.roomsVersion;
+    const id = room.id;
+    if (room.kind === "dm") return;
+    api<Room[]>("/api/rooms")
+      .then((all) => {
+        const r = all.find((x) => x.id === id);
+        if (r && room.id === id) {
+          roomName = r.name;
+          roomColor = r.color ?? null;
+        }
+      })
+      .catch(() => {});
+  });
+
+  async function loadPins() {
+    const id = room.id;
+    try {
+      const rows = await api<PinInfo[]>(`/api/rooms/${id}/pins`);
+      if (room.id === id) pins = rows;
+    } catch {
+      pins = [];
+    }
+  }
+
+  $effect(() => {
+    live.pinsVersion;
+    room.id;
+    untrack(() => {
+      void loadPins();
+    });
   });
 
   // içerik büyüyünce (mesaj, tepki, düzenleme, resim) alttaysan altta kal
@@ -369,6 +427,16 @@
     }
   }
 
+  async function setPin(id: string, on: boolean) {
+    msgError = "";
+    try {
+      if (on) await api(`/api/messages/${id}/pin`, { method: "POST", body: {} });
+      else await api(`/api/messages/${id}/pin`, { method: "DELETE" });
+    } catch (err) {
+      msgError = err instanceof Error ? err.message : "Sabitlenemedi";
+    }
+  }
+
   async function older() {
     const el = list;
     const prev = el?.scrollHeight ?? 0;
@@ -433,17 +501,51 @@
       shareOpen = false;
       lightbox = null;
       confirmClear = false;
+      pinsOpen = false;
     }
   }}
   onclick={(e) => {
-    if (shareOpen && !(e.target as HTMLElement).closest(".split")) shareOpen = false;
+    const t = e.target as HTMLElement;
+    if (shareOpen && !t.closest(".split")) shareOpen = false;
+    if (pinsOpen && !t.closest(".pinwrap")) pinsOpen = false;
   }}
 />
 
-<div class="page">
+<div
+  class="page"
+  class:tinted={!!roomColor}
+  style={roomColor ? `--accent:${roomColor};--accent-ink:${inkFor(roomColor)}` : ""}
+>
   <header>
     <button onclick={onback}>← Odalar</button>
-    <h1>{room.kind === "dm" ? "@" : ""}{room.name}</h1>
+    <h1>{room.kind === "dm" ? "@" : ""}{title}</h1>
+    {#if pins.length}
+      <div class="pinwrap">
+        <button type="button" class="pinbtn" title="Sabitlenen mesajlar" onclick={() => (pinsOpen = !pinsOpen)}>
+          📌 {pins.length}
+        </button>
+        {#if pinsOpen}
+          <div class="pinpop card">
+            <b>Sabitlenen mesajlar</b>
+            {#each pins as p (p.id)}
+              <div class="pin">
+                <Avatar name={p.username} id={p.userId} v={p.avatarAt} size={26} />
+                <div class="ptxt">
+                  <small><b>{p.username}</b> · {dateTime(p.createdAt)}</small>
+                  {#if p.attachment}<span>📷 Resim</span>{/if}
+                  {#if p.text}
+                    <span class="pt"><RichText text={p.text} {names} me={user.username} emojis={emojis.byName} /></span>
+                  {/if}
+                </div>
+                {#if canPinMsg}
+                  <button type="button" class="x" title="Sabitlemeyi kaldır" onclick={() => setPin(p.id, false)}>✕</button>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     <Toggle
       checked={!prefs.isMuted(room.id)}
       onchange={() => prefs.toggleMute(room.id)}
@@ -557,56 +659,61 @@
         <div class="dock">
           <button class="dbtn" class:muted={!voice.micOn} onclick={() => voice.toggleMic()}>
             <span>{voice.micOn ? "🎙" : "🔇"}</span>
-            {voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}
+            <span class="lbl">{voice.micOn ? "Mikrofon açık" : "Mikrofon kapalı"}</span>
           </button>
           <button class="dbtn" class:muted={voice.deafened} onclick={() => voice.toggleDeafen()}>
             <span>{voice.deafened ? "🔕" : "🎧"}</span>
-            {voice.deafened ? "Duymuyorsun" : "Duyuyorsun"}
+            <span class="lbl">{voice.deafened ? "Duymuyorsun" : "Duyuyorsun"}</span>
           </button>
-          <span class="sep"></span>
-          <div class="split">
-            <button
-              class="dbtn"
-              class:live={voice.sharing}
-              onclick={() => {
-                shareOpen = false;
-                voice.toggleShare();
-              }}
-            >
-              <span>🖥</span>
-              {voice.sharing ? "Paylaşımı durdur" : "Ekran paylaş"}
-            </button>
-            {#if !voice.sharing}
+          {#if canShare}
+            <span class="sep"></span>
+            <div class="split">
               <button
-                class="dbtn gear"
-                class:on={shareOpen}
-                title="Yayın ayarları"
-                onclick={() => (shareOpen = !shareOpen)}
-              >⚙</button>
-            {/if}
-            {#if shareOpen && !voice.sharing}
-              <div class="pop card">
-                <b>Yayın ayarları</b>
-                <Toggle bind:checked={voice.shareAudio} label="Ekran sesini de paylaş" />
-                <div class="qs">
-                  {#each QUALITIES as q (q.id)}
-                    <button
-                      type="button"
-                      class="qopt"
-                      class:on={prefs.shareQuality === q.id}
-                      onclick={() => prefs.setShareQuality(q.id)}
-                    >
-                      <b>{q.name}</b>
-                      <small>{q.desc}</small>
-                    </button>
-                  {/each}
+                class="dbtn"
+                class:live={voice.sharing}
+                onclick={() => {
+                  shareOpen = false;
+                  voice.toggleShare();
+                }}
+              >
+                <span>🖥</span>
+                <span class="lbl">{voice.sharing ? "Paylaşımı durdur" : "Ekran paylaş"}</span>
+              </button>
+              {#if !voice.sharing}
+                <button
+                  class="dbtn gear"
+                  class:on={shareOpen}
+                  title="Yayın ayarları"
+                  onclick={() => (shareOpen = !shareOpen)}
+                >⚙</button>
+              {/if}
+              {#if shareOpen && !voice.sharing}
+                <div class="pop card">
+                  <b>Yayın ayarları</b>
+                  <Toggle bind:checked={voice.shareAudio} label="Ekran sesini de paylaş" />
+                  <div class="qs">
+                    {#each QUALITIES as q (q.id)}
+                      <button
+                        type="button"
+                        class="qopt"
+                        class:on={prefs.shareQuality === q.id}
+                        onclick={() => prefs.setShareQuality(q.id)}
+                      >
+                        <b>{q.name}</b>
+                        <small>{q.desc}</small>
+                      </button>
+                    {/each}
+                  </div>
+                  <small class="muted">Yüksek kalite LiveKit bant genişliğinden daha çok harcar.</small>
                 </div>
-                <small class="muted">Yüksek kalite LiveKit bant genişliğinden daha çok harcar.</small>
-              </div>
-            {/if}
-          </div>
+              {/if}
+            </div>
+          {/if}
           <span class="sep"></span>
-          <button class="dbtn leave" onclick={() => voice.leave()}>Sesten çık</button>
+          <button class="dbtn leave" onclick={() => voice.leave()}>
+            <span>📴</span>
+            <span class="lbl">Sesten çık</span>
+          </button>
         </div>
       {/if}
 
@@ -693,6 +800,7 @@
             <div class="msg" class:mine class:has-rx={!!m.reactions?.length}>
               {#if !mine}<Avatar name={m.username} id={m.userId} v={m.avatarAt} size={28} />{/if}
               <div class="bubble" class:mentioned={!mine && mentionRe.test(m.text)}>
+                {#if pinnedIds.has(m.id)}<span class="pinmark" title="Sabitlenmiş">📌</span>{/if}
                 {#if !mine}<b>{m.username}</b>{/if}
                 {#if m.replyTo}
                   <div class="quote">
@@ -717,6 +825,7 @@
                 {:else if m.text}
                   <span class="txt"><RichText text={m.text} {names} me={user.username} emojis={emojis.byName} />{#if m.editedAt}<small class="ed"> (düzenlendi)</small>{/if}</span>
                 {/if}
+                <small class="tm">{time(m.createdAt)}</small>
                 {#if m.reactions?.length}
                   <div class="rx">
                     {#each m.reactions as r (r.emoji)}
@@ -731,7 +840,13 @@
                 {/if}
               </div>
               {#if editingId !== m.id}
-                <div class="tools" class:open={rxFor === m.id}>
+                <button
+                  type="button"
+                  class="more"
+                  title="Seçenekler"
+                  onclick={() => (touchFor = touchFor === m.id ? null : m.id)}
+                >⋯</button>
+                <div class="tools" class:open={rxFor === m.id} class:show={touchFor === m.id}>
                   {#if rxFor !== m.id}<small class="time" title={dateTime(m.createdAt)}>{time(m.createdAt)}</small>{/if}
                   {#if rxFor === m.id}
                     {#each QUICK as q}
@@ -743,9 +858,16 @@
                       title="Yanıtla"
                       onclick={() => {
                         replyTo = m;
+                        touchFor = null;
                         inputEl?.focus();
                       }}
                     >↩</button>
+                    {#if canPinMsg}
+                      <button
+                        title={pinnedIds.has(m.id) ? "Sabitlemeyi kaldır" : "Sabitle"}
+                        onclick={() => setPin(m.id, !pinnedIds.has(m.id))}
+                      >📌</button>
+                    {/if}
                     {#if mine && !m.attachment}<button title="Düzenle" onclick={() => startEdit(m)}>✎</button>{/if}
                     {#if mine || staff}
                       <button title="Sil" onclick={() => removeMsg(m)}>
@@ -875,10 +997,46 @@
 {/if}
 
 <style>
-  .page { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+  .page {
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+  }
   header { display: flex; align-items: center; gap: 14px; flex: none; }
   h1 { margin: 0; font-size: 1.4rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count, .muted { color: var(--muted); }
+
+  .page.tinted .stage,
+  .page.tinted .chat {
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  }
+
+  .pinwrap { position: relative; }
+  .pinbtn { padding: 0.35rem 0.8rem; font-size: 0.85rem; }
+  .pinpop {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 50;
+    width: 340px;
+    max-width: 90vw;
+    max-height: 55vh;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .pin { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px; border-radius: 12px; background: var(--soft); }
+  .ptxt { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 2px; }
+  .ptxt small { color: var(--muted); }
+  .pt { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .pin .x { padding: 0 0.5rem; background: transparent; }
 
   .stage {
     flex: 1;
@@ -1004,9 +1162,10 @@
   .bubble.mentioned { box-shadow: 0 0 0 2px var(--accent); }
   .mine .bubble { background: var(--accent); color: var(--accent-ink); }
   .bubble b { font-size: 0.75rem; opacity: 0.75; }
+  .pinmark { position: absolute; top: -8px; right: 10px; font-size: 0.8rem; }
   .txt { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
   .bubble small.ed { font-size: 0.7rem; opacity: 0.6; }
-  .tools .time { align-self: center; color: var(--muted); font-size: 0.72rem; padding: 0 6px; white-space: nowrap; }
+  .bubble small.tm { display: none; font-size: 0.65rem; opacity: 0.6; align-self: flex-end; }
   .quote {
     display: flex;
     flex-direction: column;
@@ -1041,7 +1200,10 @@
   .msg:hover .tools, .tools:focus-within, .tools.open { opacity: 1; }
   .tools button { padding: 0.1rem 0.45rem; font-size: 0.85rem; background: transparent; color: var(--muted); }
   .tools .q { font-size: 1.05rem; padding: 0.1rem 0.3rem; }
+  .tools .time { align-self: center; color: var(--muted); font-size: 0.72rem; padding: 0 6px; white-space: nowrap; }
   .mine .tools { order: -1; }
+  .more { display: none; align-self: center; padding: 0.1rem 0.5rem; background: transparent; color: var(--muted); }
+  .mine .more { order: -2; }
 
   .edit { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
   .edit input { color: var(--ink); background: var(--surface); }
@@ -1126,4 +1288,25 @@
   }
   .lb:hover { transform: none; }
   .lb img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
+
+  @media (hover: none) {
+    .more { display: inline-flex; }
+    .tools { display: none; }
+    .tools.show, .tools.open { display: flex; opacity: 1; }
+    .tools .time { display: none; }
+    .bubble small.tm { display: block; }
+  }
+
+  @media (max-width: 720px) {
+    .page { gap: 10px; padding-left: 10px; padding-right: 10px; }
+    header { gap: 8px; }
+    .count { display: none; }
+    .stage { padding: 10px; gap: 10px; }
+    .chat { height: 56%; min-height: 220px; padding: 10px; }
+    .people { gap: 14px; }
+    .dbtn { padding: 0.5rem 0.75rem; }
+    .dbtn .lbl { display: none; }
+    .vmeta { display: none; }
+    .bubble { max-width: 82%; }
+  }
 </style>

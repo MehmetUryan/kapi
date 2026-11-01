@@ -32,7 +32,6 @@ export async function notify(title: string, body: string) {
     if (!ok) ok = (await mod.requestPermission()) === "granted";
     if (ok) mod.sendNotification({ title, body });
   } catch {
-    // tarayıcıda çalışırken yedek yol
     try {
       if (typeof Notification === "undefined") return;
       if (Notification.permission === "default") await Notification.requestPermission();

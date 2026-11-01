@@ -1,7 +1,5 @@
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export type Prepared = { blob: Blob; w: number; h: number };
-
-// gönderilecek resmi hazırlar: büyükse 1920 px'e küçültür, küçükse olduğu gibi bırakır
 export async function prepareImage(file: File): Promise<Prepared> {
   if (!/^image\/(jpeg|png|webp|gif)$/.test(file.type)) {
     throw new Error("Sadece JPG, PNG, WebP ve GIF gönderilebilir.");

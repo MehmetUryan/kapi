@@ -22,7 +22,7 @@ class Updater {
         this.status = "available";
       }
     } catch {
-      // internet yok ya da güncelleme dosyası bulunamadı: sessizce geç
+      // internet yok ya da güncelleme dosyası bulunamadı
     }
   }
 

@@ -103,7 +103,7 @@ function readGames(): Record<string, string> {
   }
 }
 
-function inkFor(hex: string): string {
+export function inkFor(hex: string): string {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
   if (!m) return "#ffffff";
   const n = parseInt(m[1], 16);

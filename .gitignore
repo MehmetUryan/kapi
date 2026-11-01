@@ -6,3 +6,4 @@ target
 *.db-wal
 *.db-shm
 apps/server/uploads
+apps/desktop/build

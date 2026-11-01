@@ -6,6 +6,7 @@
   import { updater } from "$lib/updater.svelte";
   import ActivePanel from "$lib/ActivePanel.svelte";
   import Avatar from "$lib/Avatar.svelte";
+  import ConfirmDialog from "$lib/ConfirmDialog.svelte";
   import DmTab from "$lib/DmTab.svelte";
   import Dot from "$lib/Dot.svelte";
   import FriendsTab from "$lib/FriendsTab.svelte";
@@ -37,9 +38,8 @@
   let rooms = $state<Room[]>([]);
   let dialog = $state<"invite" | "room" | null>(null);
   let editing = $state<Room | null>(null);
+  let delTarget = $state<Room | null>(null);
   let error = $state("");
-  let confirmId = $state<string | null>(null);
-  let confirmTimer: number | undefined;
   let unlockId = $state<string | null>(null);
   let unlockPw = $state("");
   let unlockErr = $state("");
@@ -92,20 +92,25 @@
     }
   }
 
-  async function removeRoom(r: Room) {
+  async function deleteRoom() {
+    const r = delTarget;
+    if (!r) return;
     error = "";
-    if (confirmId !== r.id) {
-      confirmId = r.id;
-      clearTimeout(confirmTimer);
-      confirmTimer = window.setTimeout(() => (confirmId = null), 3000);
-      return;
-    }
-    confirmId = null;
     try {
       await api(`/api/rooms/${r.id}`, { method: "DELETE" });
       await load();
     } catch (e) {
       error = e instanceof Error ? e.message : "Silinemedi";
+    }
+  }
+
+  async function togglePin(r: Room) {
+    error = "";
+    try {
+      await api(`/api/rooms/${r.id}/pin`, { method: "PATCH", body: { pinned: !r.pinned } });
+      await load();
+    } catch (e) {
+      error = e instanceof Error ? e.message : "Sabitlenemedi";
     }
   }
 
@@ -119,10 +124,11 @@
 
   function dragOver(e: DragEvent, r: Room) {
     if (!dragId || dragId === r.id) return;
-    e.preventDefault();
     const from = rooms.findIndex((x) => x.id === dragId);
     const to = rooms.findIndex((x) => x.id === r.id);
     if (from < 0 || to < 0 || from === to) return;
+    if (!!rooms[from].pinned !== !!rooms[to].pinned) return;
+    e.preventDefault();
     const next = [...rooms];
     const [it] = next.splice(from, 1);
     next.splice(to, 0, it);
@@ -232,7 +238,7 @@
                     style={r.color ? `--rc:${r.color}` : ""}
                     onclick={() => pick(r)}
                   >
-                    <h2>{r.locked ? "🔒 " : ""}{r.visibility && r.visibility !== "all" ? "👁 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
+                    <h2>{r.pinned ? "📌 " : ""}{r.locked ? "🔒 " : ""}{r.visibility && r.visibility !== "all" ? "👁 " : ""}{r.name}{#if (live.mentionUnread[r.id] ?? 0) > 0} <span class="unread">@</span>{/if}{#if (live.unread[r.id] ?? 0) > 0} <span class="unread" class:muted={prefs.isMuted(r.id) && !(live.mentionUnread[r.id] ?? 0)}>{live.unread[r.id]}</span>{/if}</h2>
                     <div class="faces">
                       {#each talking.slice(0, 5) as p (p.id)}
                         <Avatar name={p.username} id={p.id} v={p.avatarAt} size={40} />
@@ -242,16 +248,21 @@
                     <small>{talking.length || viewing.length ? [talking.length ? `🔊 ${talking.length} seste` : "", viewing.length ? `💬 ${viewing.length} sohbette` : ""].filter(Boolean).join(" · ") : "Şu an boş"}</small>
                   </button>
                   {#if r.canDelete}
-                    <button class="del" title="Odayı sil" onclick={() => removeRoom(r)}>
-                      {confirmId === r.id ? "Silinsin mi?" : "✕"}
-                    </button>
+                    <button class="del" title="Odayı sil" onclick={() => (delTarget = r)}>✕</button>
+                  {/if}
+                  {#if r.canPin}
+                    <button
+                      class="tool pin"
+                      title={r.pinned ? "Sabitlemeyi kaldır" : "Odayı sabitle"}
+                      onclick={() => togglePin(r)}
+                    >{r.pinned ? "📌" : "📍"}</button>
                   {/if}
                   {#if r.canEdit}
-                    <button class="gear" title="Oda ayarları" onclick={() => openEditRoom(r)}>⚙</button>
+                    <button class="tool gear" title="Oda ayarları" onclick={() => openEditRoom(r)}>⚙</button>
                   {/if}
                   {#if !r.locked || r.access}
                     <button
-                      class="bell"
+                      class="tool bell"
                       title={prefs.isMuted(r.id) ? "Bildirimleri aç" : "Bildirimleri kapat"}
                       onclick={() => prefs.toggleMute(r.id)}
                     >{prefs.isMuted(r.id) ? "🔕" : "🔔"}</button>
@@ -266,7 +277,9 @@
             </button>
           </section>
           {#if canReorder}
-            <small class="hint">Odaları sürükleyerek sıralayabilirsin (herkes için geçerli).</small>
+            <small class="hint">
+              Odaları sürükleyerek sıralayabilir, 📍 ile en üste sabitleyebilirsin (herkes için geçerli).
+            </small>
           {/if}
         {:else if tab === "dms"}
           <DmTab {onopen} />
@@ -284,6 +297,17 @@
   <InviteDialog onclose={() => (dialog = null)} />
 {:else if dialog === "room"}
   <RoomDialog room={editing} me={user} onclose={() => (dialog = null)} ondone={load} />
+{/if}
+
+{#if delTarget}
+  <ConfirmDialog
+    title="Odayı sil"
+    message={`“${delTarget.name}” odası, içindeki tüm mesajlar ve resimler kalıcı olarak silinecek. Bu işlem geri alınamaz.`}
+    confirmLabel="Evet, sil"
+    danger
+    onconfirm={deleteRoom}
+    onclose={() => (delTarget = null)}
+  />
 {/if}
 
 <style>
@@ -310,6 +334,11 @@
   .content { max-width: 1000px; margin: 0 auto; }
   @media (max-width: 880px) {
     .layout { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .page { padding: 14px 12px 90px; }
+    h1 { font-size: 1.4rem; }
+    .right { gap: 6px; }
   }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
@@ -359,8 +388,9 @@
     color: var(--muted);
   }
   .del:hover { color: #d1495b; background: var(--soft); }
-  .gear { position: absolute; bottom: 10px; right: 42px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
-  .gear:hover { opacity: 1; background: var(--soft); transform: none; }
-  .bell { position: absolute; bottom: 10px; right: 10px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
-  .bell:hover { opacity: 1; background: var(--soft); transform: none; }
+  .tool { position: absolute; bottom: 10px; padding: 0.15rem 0.45rem; font-size: 0.85rem; background: transparent; opacity: 0.6; }
+  .tool:hover { opacity: 1; background: var(--soft); transform: none; }
+  .bell { right: 10px; }
+  .gear { right: 42px; }
+  .pin { right: 74px; }
 </style>
