@@ -7,3 +7,5 @@ target
 *.db-shm
 apps/server/uploads
 apps/desktop/build
+apps/server/logs
+apps/server/backups

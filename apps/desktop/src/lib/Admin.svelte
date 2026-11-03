@@ -3,8 +3,11 @@
   import {
     api,
     type AdminUser,
+    type BackupState,
+    type ErrorRow,
     type InviteRow,
     type LogRow,
+    type ReportRow,
     type StorageInfo,
     type Usage,
     type User,
@@ -12,7 +15,7 @@
   import Avatar from "$lib/Avatar.svelte";
   import InviteDialog from "$lib/InviteDialog.svelte";
 
-  type Tab = "people" | "invites" | "logs" | "usage";
+  type Tab = "people" | "invites" | "logs" | "usage" | "backups" | "reports" | "errors";
 
   let { user, onback }: { user: User; onback: () => void } = $props();
 
@@ -22,6 +25,10 @@
   let rows = $state<LogRow[]>([]);
   let usage = $state<Usage | null>(null);
   let storage = $state<StorageInfo | null>(null);
+  let backups = $state<BackupState | null>(null);
+  let reports = $state<ReportRow[]>([]);
+  let errs = $state<ErrorRow[]>([]);
+  let backupBusy = $state(false);
   let error = $state("");
   let confirmId = $state<string | null>(null);
   let delId = $state<string | null>(null);
@@ -67,6 +74,8 @@
     room_pin: "oda sabitlemesini değiştirdi",
     message_pin: "mesaj sabitledi",
     message_unpin: "mesaj sabitlemesini kaldırdı",
+    backup: "elle yedek aldı",
+    report: "sorun bildirdi",
   };
   const when = (t: number) =>
     new Date(t).toLocaleString("tr-TR", {
@@ -77,6 +86,7 @@
     });
   const hours = (m: number) => (m / 60).toFixed(1);
   const mb = (b: number) => (b / 1024 / 1024).toFixed(1);
+  const size = (b: number) => (b >= 1048576 ? `${mb(b)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
   const pct = $derived(
     usage ? Math.min(100, Math.round((usage.totalMinutes / usage.limit) * 100)) : 0,
   );
@@ -107,6 +117,18 @@
       usage = await api<Usage>("/api/usage");
       storage = await api<StorageInfo>("/api/storage");
     });
+  const fetchBackups = async () => {
+    backups = await api<BackupState>("/api/backups");
+  };
+  const loadBackups = () => guard(fetchBackups);
+  const loadReports = () =>
+    guard(async () => {
+      reports = await api<ReportRow[]>("/api/reports");
+    });
+  const loadErrors = () =>
+    guard(async () => {
+      errs = await api<ErrorRow[]>("/api/server-errors");
+    });
 
   function show(t: Tab) {
     tab = t;
@@ -114,7 +136,10 @@
     if (t === "people") loadPeople();
     else if (t === "invites") loadInvites();
     else if (t === "logs") loadLogs();
-    else loadUsage();
+    else if (t === "usage") loadUsage();
+    else if (t === "backups") loadBackups();
+    else if (t === "reports") loadReports();
+    else loadErrors();
   }
 
   onMount(loadPeople);
@@ -199,6 +224,18 @@
       resetInfo = { name: u.username, code: r.code, expiresAt: r.expiresAt };
       navigator.clipboard?.writeText(r.code).catch(() => {});
     });
+
+  async function backupNow() {
+    backupBusy = true;
+    await guard(async () => {
+      try {
+        await api("/api/backups", { method: "POST", body: {} });
+      } finally {
+        await fetchBackups().catch(() => {});
+      }
+    });
+    backupBusy = false;
+  }
 </script>
 
 <div class="page">
@@ -212,6 +249,11 @@
     <button class:on={tab === "invites"} onclick={() => show("invites")}>Davetler</button>
     <button class:on={tab === "logs"} onclick={() => show("logs")}>Günlük</button>
     <button class:on={tab === "usage"} onclick={() => show("usage")}>Kullanım</button>
+    {#if user.role === "owner"}
+      <button class:on={tab === "backups"} onclick={() => show("backups")}>Yedekler</button>
+      <button class:on={tab === "reports"} onclick={() => show("reports")}>Sorunlar</button>
+      <button class:on={tab === "errors"} onclick={() => show("errors")}>Hatalar</button>
+    {/if}
   </div>
 
   {#if error}<div class="card note err">{error}</div>{/if}
@@ -309,48 +351,152 @@
         <p class="muted">Henüz kayıt yok.</p>
       {/each}
     </section>
-  {:else if usage}
-    <section class="card list usage">
-      <h2>Sesli oda kullanımı (tahmini)</h2>
-      <div class="meter"><div class="fill" class:hot={pct >= 80} style="width:{pct}%"></div></div>
-      <p>
-        <b>{usage.totalMinutes}</b> / {usage.limit} dakika
-        (≈ {hours(usage.totalMinutes)} saat) · %{pct}
-      </p>
-      <small>
-        Dönem başlangıcı: {new Date(usage.periodStart).toLocaleDateString("tr-TR")} ·
-        Şu an seste: {usage.activeNow} bağlantı
-      </small>
-      <div class="people">
-        {#each usage.perUser as p (p.userId)}
-          <div class="row">
-            <b class="grow">{p.username}</b>
-            <span>{p.minutes} dk ({hours(p.minutes)} sa)</span>
-          </div>
-        {:else}
-          <p class="muted">Bu dönemde henüz sesli kullanım yok.</p>
-        {/each}
-      </div>
-      <small>
-        Bu rakam sunucunun gördüğü bağlantı sürelerinden hesaplanan bir tahmindir. Resmi rakam
-        LiveKit panelindeki Billing sayfasındadır. Dönem başlangıcını LiveKit'e uydurmak için
-        <code>.env</code> dosyasına <code>USAGE_PERIOD_DAY=15</code> gibi bir satır ekle (ayın kaçıncı günü).
-        Limit için <code>VOICE_MONTHLY_LIMIT=5000</code>.
-      </small>
-    </section>
-
-    {#if storage}
+  {:else if tab === "usage"}
+    {#if usage}
       <section class="card list usage">
-        <h2>Resim depolama</h2>
-        <p><b>{storage.count}</b> resim · <b>{mb(storage.bytes)} MB</b></p>
+        <h2>Sesli oda kullanımı (tahmini)</h2>
+        <div class="meter"><div class="fill" class:hot={pct >= 80} style="width:{pct}%"></div></div>
+        <p>
+          <b>{usage.totalMinutes}</b> / {usage.limit} dakika
+          (≈ {hours(usage.totalMinutes)} saat) · %{pct}
+        </p>
         <small>
-          Resimler sunucu bilgisayarının <code>apps\server\uploads</code> klasöründe durur ve
-          {storage.ttlDays} gün sonra otomatik silinir. Tek dosya sınırı {storage.maxMb} MB.
+          Dönem başlangıcı: {new Date(usage.periodStart).toLocaleDateString("tr-TR")} ·
+          Şu an seste: {usage.activeNow} bağlantı
+        </small>
+        <div class="people">
+          {#each usage.perUser as p (p.userId)}
+            <div class="row">
+              <b class="grow">{p.username}</b>
+              <span>{p.minutes} dk ({hours(p.minutes)} sa)</span>
+            </div>
+          {:else}
+            <p class="muted">Bu dönemde henüz sesli kullanım yok.</p>
+          {/each}
+        </div>
+        <small>
+          Bu rakam sunucunun gördüğü bağlantı sürelerinden hesaplanan bir tahmindir. Resmi rakam
+          LiveKit panelindeki Billing sayfasındadır. Dönem başlangıcını LiveKit'e uydurmak için
+          <code>.env</code> dosyasına <code>USAGE_PERIOD_DAY=15</code> gibi bir satır ekle (ayın kaçıncı günü).
+          Limit için <code>VOICE_MONTHLY_LIMIT=5000</code>.
         </small>
       </section>
+
+      {#if storage}
+        <section class="card list usage">
+          <h2>Resim depolama</h2>
+          <p><b>{storage.count}</b> resim · <b>{mb(storage.bytes)} MB</b></p>
+          <small>
+            Resimler sunucu bilgisayarının <code>apps\server\uploads</code> klasöründe durur ve
+            {storage.ttlDays} gün sonra otomatik silinir. Tek dosya sınırı {storage.maxMb} MB.
+          </small>
+        </section>
+      {/if}
+    {:else}
+      <p class="muted">Yükleniyor…</p>
     {/if}
+  {:else if tab === "backups"}
+    <section class="card list usage">
+      <h2>Veritabanı yedekleri</h2>
+      {#if backups}
+        <small>
+          Her gün otomatik yedek alınır, son {backups.keep} yedek saklanır. Klasör: <code>{backups.dir}</code>
+        </small>
+        {#if backups.last}
+          <p class:err={!backups.last.ok}>
+            Son deneme: {when(backups.last.at)} · {backups.last.auto ? "otomatik" : "elle"} ·
+            {backups.last.ok ? "başarılı" : `başarısız: ${backups.last.error ?? "bilinmeyen hata"}`}
+          </p>
+        {/if}
+        <div class="logbar">
+          <span class="muted">{backups.files.length} yedek</span>
+          <button class="primary" onclick={backupNow} disabled={backupBusy}>
+            {backupBusy ? "Yedekleniyor…" : "Şimdi yedekle"}
+          </button>
+        </div>
+        {#each backups.files as f (f.name)}
+          <div class="row">
+            <b class="grow">{f.name}</b>
+            <span>{size(f.size)} · {when(f.at)}</span>
+          </div>
+        {:else}
+          <p class="muted">Henüz yedek yok. Sunucu açıldıktan yaklaşık 30 saniye sonra ilk yedeği alır.</p>
+        {/each}
+      {:else}
+        <p class="muted">Yükleniyor…</p>
+      {/if}
+    </section>
+
+    <section class="card list usage">
+      <h2>Yedekten geri yükleme</h2>
+      <ol class="guide">
+        <li>Açık olan <code>kapi-sunucu.bat</code> penceresini (ve varsa <code>pnpm dev</code> penceresini) kapat. Sunucu açıkken veritabanı dosyasının üzerine yazma.</li>
+        <li><code>apps\server</code> klasöründeki <code>kapi.db</code>, <code>kapi.db-wal</code> ve <code>kapi.db-shm</code> dosyalarını silme, başka bir klasöre taşı.</li>
+        <li>Geri yüklemek istediğin yedek dosyasını <code>apps\server</code> klasörüne kopyala ve adını <code>kapi.db</code> yap.</li>
+        <li>Sunucuyu yeniden aç.</li>
+      </ol>
+      <small>
+        Veritabanın başka bir yerdeyse (<code>.env</code> içindeki <code>DB_PATH</code>), dosyayı o yoldaki ile değiştir.
+      </small>
+      <small>
+        Resimler (<code>apps\server\uploads</code>) yedeğe dahil değildir. Zaten 30 gün sonra silindikleri için ayrı yedek şart değil, istersen klasörü elle kopyala.
+      </small>
+      <small>
+        Yedekler aynı diskte durduğu için disk bozulursa onlar da gider. <code>.env</code> dosyasına
+        <code>BACKUP_DIR=D:\KapiYedek</code> gibi bir satır ekleyip sunucuyu yeniden açarsan başka bir diske ya da OneDrive klasörüne yazılır.
+      </small>
+      <small>Yedek dosyalarında mesajlar ve parola özetleri bulunur, başkalarıyla paylaşma.</small>
+    </section>
+  {:else if tab === "reports"}
+    <div class="logbar">
+      <small class="muted">
+        Kullanıcıların "Sorun bildir" ile gönderdiği son 100 bildirim. 180 günden eskileri otomatik silinir.
+      </small>
+    </div>
+    <section class="card list">
+      {#each reports as r (r.id)}
+        <div class="rep">
+          <small>
+            <b>{r.username ?? "?"}</b> · {when(r.at)} · {r.version ?? "sürüm yok"} · {r.platform ?? "platform yok"}
+          </small>
+          <span class="pre">{r.text}</span>
+          {#if r.errors.length}
+            <details>
+              <summary>Son hatalar ({r.errors.length})</summary>
+              {#each r.errors as e, i (i)}
+                <small class="pre">{e}</small>
+              {/each}
+            </details>
+          {/if}
+        </div>
+      {:else}
+        <p class="muted">Henüz bildirim yok.</p>
+      {/each}
+    </section>
   {:else}
-    <p class="muted">Yükleniyor…</p>
+    <div class="logbar">
+      <small class="muted">
+        Sunucu ve istemci hataları (son 200). Dosya: <code>apps\server\logs\hatalar.log</code>. Mesaj içerikleri kaydedilmez.
+      </small>
+    </div>
+    <section class="card list">
+      {#each errs as e, i (`${e.at}-${i}`)}
+        <div class="rep">
+          <small>
+            <b>{e.source}</b> · {when(e.at)}{e.user ? ` · ${e.user}` : ""}{e.version ? ` · ${e.version}` : ""}{e.where ? ` · ${e.where}` : ""}
+          </small>
+          <span class="pre">{e.message}</span>
+          {#if e.stack}
+            <details>
+              <summary>Ayrıntı</summary>
+              <small class="pre">{e.stack}</small>
+            </details>
+          {/if}
+        </div>
+      {:else}
+        <p class="muted">Kayıtlı hata yok.</p>
+      {/each}
+    </section>
   {/if}
 </div>
 
@@ -367,7 +513,7 @@
   .tabs button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
   .note { padding: 12px 16px; margin-bottom: 16px; }
   .err { color: #d1495b; }
-  code { background: var(--soft); padding: 2px 8px; border-radius: 8px; font-weight: 700; }
+  code { background: var(--soft); padding: 2px 8px; border-radius: 8px; font-weight: 700; overflow-wrap: anywhere; }
   .list { padding: 8px 14px; margin-bottom: 10px; }
   .row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .row:last-child { border-bottom: 0; }
@@ -375,7 +521,7 @@
   .row.log { padding: 7px 0; align-items: baseline; }
   .when { min-width: 110px; }
   .who { flex: 1; display: flex; flex-direction: column; gap: 2px; align-items: flex-start; }
-  .grow { flex: 1; }
+  .grow { flex: 1; overflow-wrap: anywhere; }
   small, .muted { color: var(--muted); }
   .acts { display: flex; gap: 8px; flex-wrap: wrap; }
   .danger { background: #d1495b; color: #fff; }
@@ -386,4 +532,9 @@
   .fill { height: 100%; background: #6cc49a; border-radius: 999px; }
   .fill.hot { background: #d1495b; }
   .people { margin-top: 6px; }
+  .rep { display: flex; flex-direction: column; gap: 3px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .rep:last-child { border-bottom: 0; }
+  .pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+  .guide { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 </style>

@@ -4,6 +4,7 @@
   import { api, clearSession, getToken, type Room, type User } from "$lib/api";
   import { desktop } from "$lib/desktop.svelte";
   import { emojis } from "$lib/emojis.svelte";
+  import { installErrorCapture } from "$lib/errors";
   import { clearImageCache } from "$lib/imageCache";
   import { live } from "$lib/live.svelte";
   import { prefs } from "$lib/prefs.svelte";
@@ -67,6 +68,7 @@
   });
 
   onMount(() => {
+    installErrorCapture();
     prefs.applyBg();
     desktop.init();
     updater.check();

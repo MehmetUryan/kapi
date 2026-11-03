@@ -182,3 +182,25 @@ export type PinInfo = {
   pinnedAt: number;
   attachment: Attachment | null;
 };
+
+export type BackupInfo = { name: string; size: number; at: number };
+export type BackupLast = { ok: boolean; at: number; auto: boolean; name?: string; error?: string };
+export type BackupState = { dir: string; keep: number; files: BackupInfo[]; last: BackupLast | null };
+export type ReportRow = {
+  id: number;
+  at: number;
+  text: string;
+  version: string | null;
+  platform: string | null;
+  errors: string[];
+  username: string | null;
+};
+export type ErrorRow = {
+  at: number;
+  source: string;
+  message: string;
+  stack?: string;
+  where?: string;
+  user?: string;
+  version?: string;
+};

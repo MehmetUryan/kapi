@@ -507,7 +507,7 @@
   onclick={(e) => {
     const t = e.target as HTMLElement;
     if (shareOpen && !t.closest(".split")) shareOpen = false;
-    if (pinsOpen && !t.closest(".pinwrap")) pinsOpen = false;
+    if (pinsOpen && !t.closest(".pinwrap") && !t.closest(".pinbar")) pinsOpen = false;
   }}
 />
 
@@ -760,6 +760,15 @@
         >🔍</button>
       </span>
     </div>
+
+    {#if pins.length && !searching}
+      {@const last = pins[0]}
+      <button type="button" class="pinbar" title="Sabitlenen mesajlar" onclick={() => (pinsOpen = !pinsOpen)}>
+        <span>📌</span>
+        <span class="pbtext"><b>{last.username}:</b> {last.text || (last.attachment ? "Resim" : "")}</span>
+        {#if pins.length > 1}<span class="pbcount">{pins.length} sabit mesaj</span>{/if}
+      </button>
+    {/if}
 
     {#if searching}
       <div class="searchpane">
@@ -1037,6 +1046,23 @@
   .ptxt small { color: var(--muted); }
   .pt { white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .pin .x { padding: 0 0.5rem; background: transparent; }
+
+    .pinbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    text-align: left;
+    padding: 6px 12px;
+    border-radius: 12px;
+    background: var(--soft);
+    border: 1.5px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+    font-size: 0.85rem;
+  }
+  .pinbar:hover { transform: none; }
+  .pbtext { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pbcount { flex: none; color: var(--muted); font-size: 0.75rem; }
 
   .stage {
     flex: 1;

@@ -7,6 +7,7 @@
   import SetApp from "$lib/SetApp.svelte";
   import SetNotify from "$lib/SetNotify.svelte";
   import SetProfile from "$lib/SetProfile.svelte";
+  import SetReport from "$lib/SetReport.svelte";
   import SetVoice from "$lib/SetVoice.svelte";
   import SetEmoji from "$lib/SetEmoji.svelte";
 
@@ -17,7 +18,16 @@
     onlogout: () => void;
   } = $props();
 
-    type Tab = "profile" | "appearance" | "voice" | "app" | "notify" | "privacy" | "account" | "emoji";
+  type Tab =
+    | "profile"
+    | "appearance"
+    | "voice"
+    | "app"
+    | "notify"
+    | "privacy"
+    | "account"
+    | "emoji"
+    | "report";
 
   let tab = $state<Tab>("profile");
 
@@ -32,6 +42,7 @@
     { id: "notify", icon: "🔔", name: "Bildirimler" },
     { id: "privacy", icon: "🎮", name: "Gizlilik ve oyun" },
     { id: "account", icon: "🔐", name: "Hesap ve güvenlik" },
+    { id: "report", icon: "🛠", name: "Sorun bildir" },
   ]);
 </script>
 
@@ -64,8 +75,10 @@
         <SetNotify />
       {:else if tab === "privacy"}
         <div class="pane"><PlayingSettings /></div>
-        {:else if tab === "emoji"}
-          <SetEmoji {user} />
+      {:else if tab === "emoji"}
+        <SetEmoji {user} />
+      {:else if tab === "report"}
+        <SetReport />
       {:else}
         <SetAccount {onlogout} />
       {/if}

@@ -28,6 +28,9 @@ import {
   voiceSessions,
 } from "./db.js";
 import { hashPassword, verifyPassword } from "./auth.js";
+import { installCrashLogging, installErrorHooks } from "./errorlog.js";
+import { registerOps } from "./ops.js";
+import { startBackupSchedule } from "./backup.js";
 
 try {
   process.loadEnvFile(fileURLToPath(new URL("../../../.env", import.meta.url)));
@@ -69,6 +72,9 @@ await app.register(cors, {
   methods: ["GET", "HEAD", "POST", "PATCH", "DELETE"],
 });
 await app.register(websocket);
+
+installCrashLogging();
+installErrorHooks(app);
 
 // resim yüklemeleri ham dosya olarak gelir
 app.addContentTypeParser(
@@ -1384,6 +1390,8 @@ app.get("/api/logs", async (req, reply) => {
     .all();
 });
 
+registerOps(app, { requireUser, requireOwner, log });
+
 // günlüğü sadece kurucu temizleyebilir
 app.delete("/api/logs", async (req, reply) => {
   const me = requireOwner(req, reply);
@@ -2219,7 +2227,6 @@ function cleanup() {
   db.delete(resetCodes).where(lt(resetCodes.expiresAt, t)).run();
   db.run(sql`DELETE FROM reactions WHERE message_id NOT IN (SELECT id FROM messages)`);
   db.run(sql`DELETE FROM pins WHERE message_id NOT IN (SELECT id FROM messages)`);
-  db.run(sql`DELETE FROM pins WHERE message_id NOT IN (SELECT id FROM messages)`);
   for (const [k, b] of buckets) if (b.reset < t) buckets.delete(k);
 
   // 30 günden eski resimleri sil
@@ -2254,32 +2261,40 @@ if (!db.select().from(rooms).where(eq(rooms.kind, "room")).get()) {
 // ---------- web sürümü: derlenmiş arayüzü tarayıcıya sunar ----------
 const WEB_DIR =
   process.env.WEB_DIR || fileURLToPath(new URL("../../desktop/build/", import.meta.url));
-const webReady = existsSync(join(WEB_DIR, "index.html"));
-if (webReady) {
-  await app.register(fastifyStatic, {
-    root: WEB_DIR,
-    setHeaders: (res, filePath) => {
-      res.setHeader(
-        "Cache-Control",
-        /[\\/]_app[\\/]immutable[\\/]/.test(filePath)
-          ? "public, max-age=31536000, immutable"
-          : "no-cache",
-      );
-    },
-  });
-}
+mkdirSync(WEB_DIR, { recursive: true });
+const hasWeb = () => existsSync(join(WEB_DIR, "index.html"));
+const webReady = hasWeb();
+await app.register(fastifyStatic, {
+  root: WEB_DIR,
+  // eski ve yeni @fastify/static sürümleri bu fonksiyona farklı nesne verir
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setHeaders: (res: any, filePath: string) => {
+    const value = /[\\/]_app[\\/]immutable[\\/]/.test(filePath)
+      ? "public, max-age=31536000, immutable"
+      : "no-cache";
+    if (typeof res.setHeader === "function") res.setHeader("Cache-Control", value);
+    else if (typeof res.header === "function") res.header("Cache-Control", value);
+  },
+});
+app.get("/api/health", async () => ({ ok: true, web: hasWeb(), webDir: WEB_DIR }));
 app.setNotFoundHandler((req, reply) => {
   const p = req.url.split("?")[0];
-  if (webReady && req.method === "GET" && !p.startsWith("/api/") && p !== "/ws") {
-    return reply.header("Cache-Control", "no-cache").sendFile("index.html");
+  if (req.method === "GET" && !p.startsWith("/api/") && p !== "/ws") {
+    if (hasWeb()) return reply.header("Cache-Control", "no-cache").sendFile("index.html");
+    return reply
+      .code(404)
+      .type("text/plain; charset=utf-8")
+      .send(
+        "Kapı sunucusu çalışıyor ama web sürümü kurulu değil.\napps\\desktop klasöründe 'pnpm build' çalıştır.",
+      );
   }
   return reply.code(404).send({ error: "Bulunamadı" });
 });
 
 const port = Number(process.env.PORT ?? 3000);
 await app.listen({ port, host: "0.0.0.0" });
+startBackupSchedule();
 console.log(`\n  Kapı sunucusu çalışıyor: http://localhost:${port}`);
-console.log("  Sunucu kodu: paket-10 (web sürümü, oda ve mesaj sabitleme)");
 console.log(webReady ? "  Web sürümü: açık" : "  Web sürümü: kapalı (apps\\desktop içinde pnpm build çalıştır)");
 
 if (!db.select().from(users).get()) {

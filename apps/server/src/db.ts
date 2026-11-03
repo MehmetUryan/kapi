@@ -99,7 +99,7 @@ export const messages = sqliteTable("messages", {
   createdAt: integer("created_at").notNull(),
 });
 
-const sqlite = new Database(process.env.DB_PATH ?? "kapi.db");
+export const sqlite = new Database(process.env.DB_PATH ?? "kapi.db");
 sqlite.pragma("journal_mode = WAL");
 sqlite.exec(`
   CREATE TABLE IF NOT EXISTS users (
